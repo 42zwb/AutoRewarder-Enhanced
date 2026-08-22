@@ -1,6 +1,7 @@
 """Interactive Microsoft OAuth and headless refresh-token handling."""
 
 import time
+import hmac
 import urllib.parse
 import uuid
 
@@ -19,10 +20,30 @@ class OAuthError(RuntimeError):
     """Raised when OAuth cannot produce a usable access token."""
 
 
+def is_valid_callback_url(current_url, expected_state):
+    """Validate the fixed OAuth redirect and its anti-CSRF state value."""
+    try:
+        parsed = urllib.parse.urlparse(current_url or "")
+        expected = urllib.parse.urlparse(OAUTH_REDIRECT_URI)
+        if (
+            parsed.scheme.lower() != expected.scheme
+            or (parsed.hostname or "").lower().rstrip(".")
+            != (expected.hostname or "").lower().rstrip(".")
+            or parsed.path != expected.path
+        ):
+            return False
+        callback_state = urllib.parse.parse_qs(parsed.query).get("state", [""])[0]
+        return hmac.compare_digest(str(callback_state), str(expected_state))
+    except (TypeError, ValueError):
+        return False
+
+
 class OAuthManager:
     """Manage one account's protected refresh token."""
 
-    def __init__(self, account_id, token_path, driver_manager=None, logger=None, session=None):
+    def __init__(
+        self, account_id, token_path, driver_manager=None, logger=None, session=None
+    ):
         self.account_id = str(account_id)
         self.store = ProtectedTokenStore(token_path)
         self.driver_manager = driver_manager
@@ -59,19 +80,25 @@ class OAuthManager:
         if response.status_code in (400, 401, 403):
             raise OAuthError("OAuth refresh token expired or was rejected")
         if response.status_code >= 400:
-            raise OAuthError(f"OAuth token endpoint returned HTTP {response.status_code}")
+            raise OAuthError(
+                f"OAuth token endpoint returned HTTP {response.status_code}"
+            )
         try:
             payload = response.json()
         except ValueError as exc:
             raise OAuthError("OAuth token endpoint returned invalid JSON") from exc
-        access_token = payload.get("access_token") if isinstance(payload, dict) else None
+        access_token = (
+            payload.get("access_token") if isinstance(payload, dict) else None
+        )
         if not access_token:
             raise OAuthError("OAuth token response did not contain an access token")
         new_refresh = payload.get("refresh_token") or refresh_token
         try:
             self.store.save(new_refresh, self.account_id)
         except SecretStoreError as exc:
-            raise OAuthError("Could not save the protected OAuth refresh token") from exc
+            raise OAuthError(
+                "Could not save the protected OAuth refresh token"
+            ) from exc
         self._access_token = str(access_token)
         try:
             expires = max(60, int(payload.get("expires_in", 3600)))
@@ -81,7 +108,11 @@ class OAuthManager:
         return self._access_token
 
     def get_access_token(self, force_refresh=False):
-        if self._access_token and not force_refresh and time.time() < self._access_token_expires_at:
+        if (
+            self._access_token
+            and not force_refresh
+            and time.time() < self._access_token_expires_at
+        ):
             return self._access_token
         try:
             refresh_token = self.store.load(self.account_id)
@@ -99,7 +130,9 @@ class OAuthManager:
         short-lived authorization code, which is exchanged immediately.
         """
         if self.driver_manager is None:
-            raise OAuthError("An Edge profile is required for interactive authorization")
+            raise OAuthError(
+                "An Edge profile is required for interactive authorization"
+            )
         params = {
             "client_id": OAUTH_CLIENT_ID,
             "scope": OAUTH_SCOPE,
@@ -116,6 +149,9 @@ class OAuthManager:
             code = None
             while time.time() < deadline:
                 current = driver.current_url or ""
+                if not is_valid_callback_url(current, params["state"]):
+                    time.sleep(1)
+                    continue
                 parsed = urllib.parse.urlparse(current)
                 query = urllib.parse.parse_qs(parsed.query)
                 if query.get("error"):
@@ -140,20 +176,30 @@ class OAuthManager:
                     timeout=(10, 30),
                 )
             except requests.RequestException as exc:
-                raise OAuthError(f"OAuth authorization exchange network error: {exc}") from exc
+                raise OAuthError(
+                    f"OAuth authorization exchange network error: {exc}"
+                ) from exc
             if response.status_code >= 400:
-                raise OAuthError(f"OAuth authorization exchange returned HTTP {response.status_code}")
+                raise OAuthError(
+                    f"OAuth authorization exchange returned HTTP {response.status_code}"
+                )
             try:
                 payload = response.json()
             except ValueError as exc:
-                raise OAuthError("OAuth authorization exchange returned invalid JSON") from exc
-            refresh_token = payload.get("refresh_token") if isinstance(payload, dict) else None
+                raise OAuthError(
+                    "OAuth authorization exchange returned invalid JSON"
+                ) from exc
+            refresh_token = (
+                payload.get("refresh_token") if isinstance(payload, dict) else None
+            )
             if not refresh_token:
                 raise OAuthError("OAuth response did not contain a refresh token")
             self.store.save(refresh_token, self.account_id)
             self._access_token = None
             token = self._exchange_refresh_token(refresh_token)
-            self._log("Mobile OAuth authorization completed; refresh token saved with Windows DPAPI.")
+            self._log(
+                "Mobile OAuth authorization completed; refresh token saved with Windows DPAPI."
+            )
             return bool(token)
         except SecretStoreError as exc:
             raise OAuthError(str(exc)) from exc

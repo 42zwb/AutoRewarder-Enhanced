@@ -4,6 +4,11 @@ import os
 import json
 from datetime import datetime
 
+from ..security import atomic_write_json, safe_log_text
+
+_MAX_HISTORY_RECORDS = 5000
+_MAX_HISTORY_BYTES = 8 * 1024 * 1024
+
 
 class HistoryManager:
     """
@@ -31,10 +36,18 @@ class HistoryManager:
         Returns an empty list if the file is missing or unreadable.
         """
 
-        if (
-            not os.path.exists(self.history_file)
-            or os.path.getsize(self.history_file) == 0
-        ):
+        try:
+            size = (
+                os.path.getsize(self.history_file)
+                if os.path.exists(self.history_file)
+                else 0
+            )
+        except OSError:
+            size = 0
+        if size == 0:
+            return []
+        if size > _MAX_HISTORY_BYTES:
+            self._log("[ERROR] History file is too large. Starting with a fresh one.")
             return []
 
         try:
@@ -44,21 +57,36 @@ class HistoryManager:
                 if not isinstance(history, list):
                     raise ValueError("History data must be a list")
 
-                return history
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                clean = []
+                for item in history[-_MAX_HISTORY_RECORDS:]:
+                    if not isinstance(item, dict):
+                        continue
+                    clean.append(
+                        {
+                            "date": safe_log_text(item.get("date"), 32),
+                            "time": safe_log_text(item.get("time"), 32),
+                            "query": safe_log_text(item.get("query"), 256),
+                            "status": safe_log_text(item.get("status"), 160),
+                        }
+                    )
+                return clean
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, OSError):
             self._log(
                 "[ERROR] History file was unreadable or damaged. Starting with a fresh one."
             )
 
             backup_path = self.history_file + ".backup"
 
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-
-            os.replace(self.history_file, backup_path)
-
-            with open(self.history_file, "w", encoding="utf-8") as file:
-                json.dump([], file, indent=4)
+            try:
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                os.replace(self.history_file, backup_path)
+            except OSError:
+                pass
+            try:
+                atomic_write_json(self.history_file, [])
+            except OSError:
+                pass
 
             return []
 
@@ -70,14 +98,9 @@ class HistoryManager:
             history_list (list): The list of search records to save.
         """
 
-        os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
-
-        temp_file = self.history_file + ".tmp"
-
-        with open(temp_file, "w", encoding="utf-8") as file:
-            json.dump(history_list, file, indent=4)
-
-        os.replace(temp_file, self.history_file)
+        if not isinstance(history_list, list):
+            history_list = []
+        atomic_write_json(self.history_file, history_list[-_MAX_HISTORY_RECORDS:])
 
     def add_to_history(self, query_text, status):
         """
@@ -95,8 +118,8 @@ class HistoryManager:
         new_record = {
             "date": current_date,
             "time": current_time,
-            "query": query_text,
-            "status": status,
+            "query": safe_log_text(query_text, 256),
+            "status": safe_log_text(status, 160),
         }
 
         history_list = self.get_history()

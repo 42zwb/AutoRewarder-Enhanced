@@ -20,6 +20,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .card import RewardsCard
 from .card_js import CardStatus
+from ..security import atomic_write_json
 
 # The Rewards dashboard groups click-through tasks into two sections we can
 # automate: the Daily Set (3 cards, refreshed each day) and "More Activities"
@@ -136,18 +137,15 @@ class DailySet:
                     data = json.load(file)
             except Exception:
                 self._log(f"[ERROR] Failed to read status file: {self.status_file}")
+        if not isinstance(data, dict):
+            data = {}
 
         data["last_daily_set_date"] = today
         data["last_attempt_date"] = today
         data["last_result"] = "completed"
         data["sections"] = self.last_sections
 
-        # Atomic write to reduce the chance of leaving a partially-written JSON file.
-        os.makedirs(os.path.dirname(self.status_file), exist_ok=True)
-        temp_file = self.status_file + ".tmp"
-        with open(temp_file, "w", encoding="utf-8") as file:
-            json.dump(data, file)
-        os.replace(temp_file, self.status_file)
+        atomic_write_json(self.status_file, data)
 
     def record_attempt(self, success=False):
         """Persist section-level completion/partial diagnostics without marking the day done."""
@@ -159,14 +157,12 @@ class DailySet:
                     data = json.load(file)
             except Exception:
                 data = {}
+        if not isinstance(data, dict):
+            data = {}
         data["last_attempt_date"] = today
         data["last_result"] = "completed" if success else "partial"
         data["sections"] = self.last_sections
-        os.makedirs(os.path.dirname(self.status_file), exist_ok=True)
-        temp_file = self.status_file + ".tmp"
-        with open(temp_file, "w", encoding="utf-8") as file:
-            json.dump(data, file)
-        os.replace(temp_file, self.status_file)
+        atomic_write_json(self.status_file, data)
 
     # -- Section processing ----------------------------------------------------
 
@@ -235,8 +231,25 @@ class DailySet:
         locked_count = statuses.count(CardStatus.LOCKED)
         excluded_count = statuses.count(CardStatus.EXCLUDED)
         already_complete = statuses.count(CardStatus.COMPLETE)
-        incomplete_indices = [
-            i for i, s in enumerate(statuses) if s == CardStatus.INCOMPLETE
+
+        def _identity(card):
+            try:
+                links = card.find_elements(
+                    By.CSS_SELECTOR, "a.ds-card-sec, a[role='link'][href]"
+                )
+                for link in links:
+                    href = (link.get_attribute("href") or "").strip()
+                    if href:
+                        return "href:" + href
+            except Exception:
+                pass
+            title = self.cards.get_title(card)
+            return "title:" + title if title else ""
+
+        incomplete_targets = [
+            (_identity(card), self.cards.get_title(card))
+            for card, status in zip(cards, statuses)
+            if status == CardStatus.INCOMPLETE
         ]
         total_actionable = len(cards) - locked_count - excluded_count
 
@@ -249,7 +262,7 @@ class DailySet:
                 f"{section_name}: {excluded_count} promo/sweepstake card(s) — skipped (no per-click points)."
             )
 
-        if not incomplete_indices:
+        if not incomplete_targets:
             if total_actionable == 0:
                 self._log(
                     f"{section_name}: all {len(cards)} cards locked, nothing to do."
@@ -268,28 +281,37 @@ class DailySet:
 
         self._log(
             f"{section_name}: {already_complete}/{total_actionable} already complete, "
-            f"attempting {len(incomplete_indices)} remaining."
+            f"attempting {len(incomplete_targets)} remaining."
         )
 
-        for idx in incomplete_indices:
+        attempted = 0
+        for idx, (identity, original_title) in enumerate(incomplete_targets):
             if stop_event is not None and stop_event.is_set():
                 self._log(f"Stop requested — halting {section_name} loop.")
                 break
 
-            # Re-apply the same visibility filter used to build
-            # incomplete_indices. Without it, tomorrow's hidden cards
-            # (kept in the DOM under ng-hide) re-enter the list and
-            # shift the indices — we'd then click the wrong card or
-            # hit a 0x0 element.
+            # Re-read and relocate by the card's stable href/title. A completed
+            # card disappears or moves during SPA re-render, so an index from
+            # the initial snapshot can point at a different activity.
             current_all = driver.find_elements(By.CSS_SELECTOR, selector)
             current = [c for c in current_all if self.cards.is_visible(c)]
-            if idx >= len(current):
+            target_card = None
+            if identity:
+                matches = [c for c in current if _identity(c) == identity]
+                if len(matches) == 1:
+                    target_card = matches[0]
+            if target_card is None and original_title:
+                matches = [
+                    c for c in current if self.cards.get_title(c) == original_title
+                ]
+                if len(matches) == 1:
+                    target_card = matches[0]
+            if target_card is None:
                 self._log(
-                    f"[WARNING] {section_name} card #{idx + 1} disappeared between "
-                    f"snapshot and click; skipping."
+                    f"[WARNING] {section_name} activity #{idx + 1} could not be "
+                    "relocated after the page changed; skipping."
                 )
                 continue
-            target_card = current[idx]
 
             # State may have shifted (became locked, became complete) while
             # we processed earlier cards.
@@ -304,9 +326,10 @@ class DailySet:
             else:
                 self._log(f"  → {section_name} #{idx + 1}: clicking…")
 
-            self.cards.click(
+            if self.cards.click(
                 target_card, human, main_tab, label=label, stop_event=stop_event
-            )
+            ):
+                attempted += 1
 
         # If the user stopped, skip the post-run validation entirely — the
         # driver is dead and we don't want to log misleading 0/N counts.
@@ -316,7 +339,7 @@ class DailySet:
                 "newly": 0,
                 "final": already_complete,
                 "total": total_actionable,
-                "attempted": len(incomplete_indices),
+                "attempted": attempted,
             }
 
         # Settle so MS has time to reflect earned points back to the card UI.
@@ -337,7 +360,7 @@ class DailySet:
                 "newly": 0,
                 "final": already_complete,
                 "total": total_actionable,
-                "attempted": len(incomplete_indices),
+                "attempted": attempted,
             }
 
         # Re-tally excluding both locked and excluded (sweepstake) cards.
@@ -362,7 +385,7 @@ class DailySet:
             "newly": newly_completed,
             "final": final_complete,
             "total": final_actionable,
-            "attempted": len(incomplete_indices),
+            "attempted": attempted,
         }
 
     # -- Top-level entry point -------------------------------------------------
@@ -416,7 +439,7 @@ class DailySet:
             self.last_totals = dict(handler.last_totals)
             self.last_sections = {
                 "Daily Set": {
-                    "status": "completed" if result else "partial",
+                    "status": handler.daily_status,
                     "total": handler.last_totals.get("total", 0),
                     "final": handler.last_totals.get("final", 0),
                 },
@@ -544,7 +567,9 @@ class DailySet:
                         )
                         time.sleep(random.uniform(1.5, 2.5))
                     except TimeoutException:
-                        self._log("[WARNING] Dashboard did not reload for the next activity pass.")
+                        self._log(
+                            "[WARNING] Dashboard did not reload for the next activity pass."
+                        )
                         break
                     self.cards = RewardsCard(driver, logger=self.logger)
                     main_tab = driver.current_window_handle
@@ -588,7 +613,10 @@ class DailySet:
                     for name, result in pass_sections.items()
                 }
 
-                if pass_totals["total"] == 0 or pass_totals["final"] == pass_totals["total"]:
+                if (
+                    pass_totals["total"] == 0
+                    or pass_totals["final"] == pass_totals["total"]
+                ):
                     break
                 if pass_totals["attempted"] == 0:
                     break

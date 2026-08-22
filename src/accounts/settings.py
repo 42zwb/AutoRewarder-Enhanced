@@ -3,7 +3,9 @@
 import json
 import os
 
-from ..config import APP_DIR, GLOBAL_SETTINGS_PATH
+from ..config import APP_DIR, GLOBAL_SETTINGS_PATH, LLM_API_KEY_PATH
+from ..mobiletasks.secure_store import ApiKeyStore, SecretStoreError
+from ..security import atomic_write_json
 
 SCHEMA_VERSION = 3
 
@@ -47,28 +49,14 @@ def _write_json(path, data):
     """
     import time as _time
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp_path = path + ".tmp"
-
-    if os.path.exists(temp_path):
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-
     last_err = None
     for attempt in range(4):
         try:
-            with open(temp_path, "w", encoding="utf-8") as file:
-                json.dump(data, file, indent=4)
-            os.replace(temp_path, path)
+            atomic_write_json(path, data)
             return
-        except PermissionError as e:
-            last_err = e
-            _time.sleep(0.15 * (attempt + 1))
         except OSError as e:
             last_err = e
-            _time.sleep(0.1)
+            _time.sleep(0.15 * (attempt + 1))
     raise last_err if last_err else OSError(f"Could not write {path}")
 
 
@@ -80,6 +68,39 @@ class GlobalSettingsManager:
 
     def __init__(self):
         self.path = GLOBAL_SETTINGS_PATH
+        self._api_key_store = ApiKeyStore(LLM_API_KEY_PATH)
+
+    def _migrate_legacy_api_key(self, settings):
+        """Move the pre-v4 plaintext key out of settings.json when possible."""
+        if not isinstance(settings, dict):
+            return settings
+        legacy = settings.get("llm_api_key")
+        if not isinstance(legacy, str) or not legacy.strip():
+            settings.pop("llm_api_key", None)
+            return settings
+        try:
+            self._api_key_store.save(legacy.strip())
+            settings = dict(settings)
+            settings.pop("llm_api_key", None)
+            _write_json(self.path, settings)
+        except (SecretStoreError, OSError):
+            # Keep the key available in memory for this call, but never return
+            # it through the generic get_settings() API.
+            pass
+        return settings
+
+    def _load_api_key(self):
+        try:
+            value = self._api_key_store.load()
+        except SecretStoreError:
+            value = ""
+        if value:
+            return value
+        # A failed migration should not make an existing configuration
+        # unusable. This is a one-time compatibility fallback.
+        raw = _read_json(self.path, {})
+        legacy = raw.get("llm_api_key") if isinstance(raw, dict) else ""
+        return str(legacy or "").strip()
 
     def get_settings(self):
         """Return settings merged with defaults."""
@@ -100,15 +121,11 @@ class GlobalSettingsManager:
             # Default query counts.
             "queries_pc": 30,
             "queries_mobile": 20,
-            # LLM-generated search terms (bring-your-own-key). When enabled and
-            # a key is present, each phase asks the chosen provider for fresh
-            # queries in the user's language; any failure falls back to the
-            # static assets/queries.json. The key is stored in plain text here,
-            # consistent with the rest of settings.json.
+            # LLM-generated search terms (bring-your-own-key). The API key is
+            # stored separately using DPAPI (or a mode-600 development file).
             "use_llm_queries": False,
             "llm_provider": "openai",  # openai | anthropic | gemini
             "llm_model": "",  # blank = provider default
-            "llm_api_key": "",
             # Language of generated queries. "auto" resolves from
             # detected_locale (navigator.language) or OS detection.
             "search_locale": "auto",
@@ -142,13 +159,26 @@ class GlobalSettingsManager:
                 pass
             return defaults
 
-        # Fill missing defaults without clobbering existing keys.
+        settings = self._migrate_legacy_api_key(settings)
+        # Fill missing defaults without returning secrets through this generic
+        # settings endpoint.
         merged = {**defaults, **settings}
+        merged.pop("llm_api_key", None)
         return merged
 
     def save_settings(self, settings):
         """Persist settings to disk."""
-        _write_json(self.path, settings)
+        if not isinstance(settings, dict):
+            raise ValueError("Settings must be a dictionary")
+        clean = dict(settings)
+        # Enforce the secret-storage invariant at the generic persistence
+        # boundary too, so legacy callers cannot put a key back in JSON.
+        if "llm_api_key" in clean:
+            legacy = clean.pop("llm_api_key")
+            if legacy is not None:
+                self._api_key_store.save(str(legacy).strip())
+        clean.pop("llm_api_key", None)
+        _write_json(self.path, clean)
 
     def set_hide_browser(self, is_hide):
         """Update the hide_browser flag in settings."""
@@ -168,13 +198,23 @@ class GlobalSettingsManager:
 
     def set_current_account_id(self, account_id):
         """Persist the current account id in settings."""
+        if account_id is not None:
+            import re
+
+            if not isinstance(account_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{1,64}", account_id
+            ):
+                raise ValueError("Invalid account id")
         settings = self.get_settings()
         settings["current_account_id"] = account_id
         self.save_settings(settings)
 
     def get_queries_pc(self):
         """Return the saved PC queries count from settings."""
-        return self.get_settings().get("queries_pc", 30)
+        try:
+            return max(0, min(130, int(self.get_settings().get("queries_pc", 30))))
+        except (TypeError, ValueError, OverflowError):
+            return 30
 
     def set_queries_pc(self, count):
         """Persist the PC queries count in settings."""
@@ -184,7 +224,10 @@ class GlobalSettingsManager:
 
     def get_queries_mobile(self):
         """Return the saved mobile queries count from settings."""
-        return self.get_settings().get("queries_mobile", 20)
+        try:
+            return max(0, min(99, int(self.get_settings().get("queries_mobile", 20))))
+        except (TypeError, ValueError, OverflowError):
+            return 20
 
     def set_queries_mobile(self, count):
         """Persist the mobile queries count in settings."""
@@ -198,14 +241,19 @@ class GlobalSettingsManager:
 
     def get_llm_config(self):
         """Return the LLM query-generation config from settings."""
+        from ..search.llm import SUPPORTED_PROVIDERS
+
         s = self.get_settings()
+        provider = str(s.get("llm_provider", "openai") or "openai").strip().lower()
+        if provider not in SUPPORTED_PROVIDERS:
+            provider = "openai"
         return {
             "use_llm_queries": bool(s.get("use_llm_queries", False)),
-            "llm_provider": s.get("llm_provider", "openai"),
-            "llm_model": s.get("llm_model", ""),
-            "llm_api_key": s.get("llm_api_key", ""),
-            "search_locale": s.get("search_locale", "auto"),
-            "detected_locale": s.get("detected_locale", ""),
+            "llm_provider": provider,
+            "llm_model": str(s.get("llm_model", "") or "")[:100],
+            "llm_api_key": self._load_api_key(),
+            "search_locale": str(s.get("search_locale", "auto") or "auto")[:32],
+            "detected_locale": str(s.get("detected_locale", "") or "")[:32],
         }
 
     def set_llm_config(
@@ -214,8 +262,8 @@ class GlobalSettingsManager:
         """Persist the LLM query-generation config.
 
         Unknown providers fall back to "openai"; an empty locale becomes
-        "auto". The API key is stored as-is (plain text) alongside the other
-        settings.
+        "auto". The API key is stored by ``ApiKeyStore`` rather than in the
+        general settings JSON.
         """
         from ..search.llm import SUPPORTED_PROVIDERS
 
@@ -224,19 +272,36 @@ class GlobalSettingsManager:
             provider = "openai"
 
         locale = str(search_locale or "").strip() or "auto"
+        locale = (
+            "".join(char for char in locale if ord(char) >= 32 and ord(char) != 127)[
+                :32
+            ]
+            or "auto"
+        )
+        model = "".join(
+            char
+            for char in str(model or "").strip()
+            if ord(char) >= 32 and ord(char) != 127
+        )[:100]
+        key = str(api_key or "").strip()
 
         settings = self.get_settings()
         settings["use_llm_queries"] = bool(use_llm_queries)
         settings["llm_provider"] = provider
-        settings["llm_model"] = str(model or "").strip()
-        settings["llm_api_key"] = str(api_key or "").strip()
+        self._api_key_store.save(key)
+        settings["llm_model"] = model
         settings["search_locale"] = locale
         self.save_settings(settings)
 
     def set_detected_locale(self, locale):
         """Persist the locale reported by the GUI (navigator.language)."""
         settings = self.get_settings()
-        settings["detected_locale"] = str(locale or "").strip()
+        value = "".join(
+            char
+            for char in str(locale or "").strip()
+            if ord(char) >= 32 and ord(char) != 127
+        )[:32]
+        settings["detected_locale"] = value
         self.save_settings(settings)
 
     def get_effective_locale(self):

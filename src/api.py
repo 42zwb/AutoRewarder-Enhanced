@@ -11,6 +11,7 @@ import platform
 import subprocess
 import threading
 import webbrowser
+import urllib.parse
 
 # `webview` (pywebview) is imported lazily inside `open_history_window` — the
 # only method that needs it — so AutoRewarder_CLI.py can import
@@ -23,6 +24,7 @@ from .config import (
     CURRENT_VERSION,
     JSON_FILE_PATH,
     BASE_DIR,
+    account_dir,
     edge_profile_path,
     history_path,
     status_path,
@@ -48,6 +50,7 @@ from .stats import (
 )
 from .mobiletasks import MobileTaskRunner
 from .mobiletasks.oauth import OAuthError, OAuthManager
+from .security import is_allowed_https_url, safe_log_text
 
 # Default wall-clock fire time (24h "HH:MM") if an account schedule does
 # not yet have a `run_time` value. Each account stores its own time in
@@ -64,6 +67,8 @@ _SYSTEMD_UNIT_NAME = "autorewarder"
 
 # HH:MM validator — accepts 00:00..23:59.
 _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+MAX_PC_QUERIES = 130
+MAX_MOBILE_QUERIES = 99
 
 
 def _normalize_run_time(value):
@@ -396,7 +401,10 @@ class AutoRewarderAPI:
 
     def open_link(self, url):
         """Open a URL in the system default browser."""
-        webbrowser.open(url)
+        if not is_allowed_https_url(url, ("github.com", "microsoft.com", "msn.com")):
+            self.log("[WARNING] Refused to open an untrusted external URL.")
+            return False
+        return bool(webbrowser.open(url))
 
     def load_driver_in_background(self):
         """Warmup the WebDriver download, only if an account is selected."""
@@ -625,7 +633,11 @@ class AutoRewarderAPI:
         if not account_id or not self.account_manager.exists(account_id):
             return False
         ok = AccountMetaManager(account_id).set_mobile_tasks(payload)
-        if ok and account_id == self.account_manager.current_id() and self.mobile_task_runner:
+        if (
+            ok
+            and account_id == self.account_manager.current_id()
+            and self.mobile_task_runner
+        ):
             self.mobile_task_runner.set_config(
                 AccountMetaManager(account_id).get_mobile_tasks()
             )
@@ -935,7 +947,8 @@ class AutoRewarderAPI:
         # PyInstaller's `console=False` in AutoRewarder.spec means the exe
         # itself has no console, so this fires silently.
         if getattr(sys, "frozen", False):
-            return f'"{sys.executable}" --headless --account {account_id}'
+            account_dir(account_id)
+            return f'"{sys.executable}" --headless --account "{account_id}"'
 
         # Dev mode: prefer pythonw.exe on Windows. python.exe is the console
         # variant, so when Task Scheduler fires it Windows allocates a
@@ -948,16 +961,19 @@ class AutoRewarderAPI:
             if os.path.exists(candidate):
                 python_exe = candidate
         entry = os.path.join(BASE_DIR, "AutoRewarder.py")
-        return f'"{python_exe}" "{entry}" --headless --account {account_id}'
+        account_dir(account_id)
+        return f'"{python_exe}" "{entry}" --headless --account "{account_id}"'
 
     # ---- Per-account OS-task naming -----------------------------------
 
     def _windows_task_name(self, account_id):
         """schtasks task name for a specific account."""
+        account_dir(account_id)
         return f"{_AUTOSTART_TASK_NAME}.{account_id}"
 
     def _systemd_unit_base(self, account_id):
         """Base name for the systemd service + timer of a specific account."""
+        account_dir(account_id)
         return f"{_SYSTEMD_UNIT_NAME}-{account_id}"
 
     # ------------------------------------------------------------------
@@ -1092,15 +1108,16 @@ class AutoRewarderAPI:
         Task Scheduler XML Action element, which expects them separately.
         Mirrors the same dev-vs-frozen logic as _autostart_command.
         """
+        account_dir(account_id)
         if getattr(sys, "frozen", False):
-            return sys.executable, f"--headless --account {account_id}"
+            return sys.executable, f'--headless --account "{account_id}"'
 
         python_exe = sys.executable
         candidate = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
         if os.path.exists(candidate):
             python_exe = candidate
         entry = os.path.join(BASE_DIR, "AutoRewarder.py")
-        return python_exe, f'"{entry}" --headless --account {account_id}'
+        return python_exe, f'"{entry}" --headless --account "{account_id}"'
 
     def _build_windows_task_xml(self, account_id, run_time, label):
         """
@@ -1126,7 +1143,7 @@ class AutoRewarderAPI:
                 .replace("'", "&apos;")
             )
 
-        description = f"AutoRewarder daily run ({label})"
+        description = f"AutoRewarder daily run ({safe_log_text(label, limit=120)})"
         # Past anchor date — only the HH:MM portion of StartBoundary
         # matters for DaysInterval=1 recurrence.
         start_boundary = f"2025-01-01T{run_time}:00"
@@ -1266,7 +1283,9 @@ class AutoRewarderAPI:
 
             os.makedirs(base, exist_ok=True)
             cmd = self._autostart_command(account_id)
-            desc_label = label or account_id
+            desc_label = safe_log_text(label or account_id, limit=120).replace(
+                "%", "%%"
+            )
             service_file = (
                 "[Unit]\n"
                 f"Description=AutoRewarder daily run ({desc_label})\n\n"
@@ -1695,6 +1714,7 @@ class AutoRewarderAPI:
                 self.log("Edge: browser sign-in temporarily disabled for this setup.")
 
         setup_succeeded = False
+        saw_rewards_page = False
         setup_driver = None
 
         try:
@@ -1758,16 +1778,35 @@ class AutoRewarderAPI:
                 # Fallback if the forced-prompt URL fails.
                 setup_driver.get("https://login.live.com/")
 
-            self.log("""Sign in with the Microsoft account for THIS profile.
+            self.log(
+                """Sign in with the Microsoft account for THIS profile.
 - Enter the email and password yourself; don't pick a suggested account.
 - If Microsoft still auto-connects another account, click the avatar
   (top-right on Bing) and choose 'Sign in with a different account'.
-- Close the browser when you're done.""")
+- Close the browser when you're done."""
+            )
 
             while len(setup_driver.window_handles) > 0:
+                try:
+                    current_url = setup_driver.current_url or ""
+                    parsed = urllib.parse.urlparse(current_url)
+                    host = (parsed.hostname or "").lower().rstrip(".")
+                    if (
+                        host == "bing.com"
+                        or host.endswith(".bing.com")
+                        or host == "rewards.bing.com"
+                    ) and not host.endswith("login.live.com"):
+                        saw_rewards_page = True
+                except Exception:
+                    pass
                 time.sleep(1)
 
-            setup_succeeded = True
+            setup_succeeded = saw_rewards_page
+            if not setup_succeeded:
+                self.log(
+                    "[WARNING] Browser closed before a signed-in Bing page was observed; "
+                    "First Setup was not marked complete."
+                )
 
         except Exception as e:
             error_msg = str(e).lower()
@@ -1776,7 +1815,7 @@ class AutoRewarderAPI:
                 or "disconnected" in error_msg
                 or "not reachable" in error_msg
             ):
-                setup_succeeded = True
+                setup_succeeded = saw_rewards_page
             else:
                 self.log(f"[ERROR] Error during setup: {e}")
                 if self.history is not None:
@@ -2088,6 +2127,7 @@ class AutoRewarderAPI:
         Args:
             message (str): The message to log.
         """
+        message = safe_log_text(message, limit=4000)
         if self._webview_window:
             try:
                 safe_message = json.dumps(message)
@@ -2237,18 +2277,28 @@ class AutoRewarderAPI:
 
         before = runner.get_status()
         try:
-            summary = runner.run(
-                self.account_manager.current_id(), force=bool(force)
-            )
+            summary = runner.run(self.account_manager.current_id(), force=bool(force))
         except Exception as exc:
             self.log(f"[ERROR] Mobile task runner failed: {exc}")
             return None
         after = runner.get_status()
 
-        before_check = before.get("check_in") if isinstance(before.get("check_in"), dict) else {}
-        after_check = after.get("check_in") if isinstance(after.get("check_in"), dict) else {}
-        before_read = before.get("read_to_earn") if isinstance(before.get("read_to_earn"), dict) else {}
-        after_read = after.get("read_to_earn") if isinstance(after.get("read_to_earn"), dict) else {}
+        before_check = (
+            before.get("check_in") if isinstance(before.get("check_in"), dict) else {}
+        )
+        after_check = (
+            after.get("check_in") if isinstance(after.get("check_in"), dict) else {}
+        )
+        before_read = (
+            before.get("read_to_earn")
+            if isinstance(before.get("read_to_earn"), dict)
+            else {}
+        )
+        after_read = (
+            after.get("read_to_earn")
+            if isinstance(after.get("read_to_earn"), dict)
+            else {}
+        )
 
         def _number(mapping, key):
             try:
@@ -2321,10 +2371,17 @@ class AutoRewarderAPI:
         mobile_tasks_only = bool(mobile_tasks_only)
 
         try:
-            pc_count = max(0, int(pc_count or 0))
-            mobile_count = max(0, int(mobile_count or 0))
+            requested_pc = max(0, int(pc_count or 0))
+            requested_mobile = max(0, int(mobile_count or 0))
         except (TypeError, ValueError):
-            pc_count, mobile_count = 0, 0
+            requested_pc, requested_mobile = 0, 0
+        pc_count = min(MAX_PC_QUERIES, requested_pc)
+        mobile_count = min(MAX_MOBILE_QUERIES, requested_mobile)
+        if (requested_pc, requested_mobile) != (pc_count, mobile_count):
+            self.log(
+                f"[WARNING] Search counts capped at PC={MAX_PC_QUERIES}, "
+                f"Mobile={MAX_MOBILE_QUERIES}."
+            )
 
         mobile_config_enabled = False
         if self.account_meta is not None:
@@ -2394,6 +2451,7 @@ class AutoRewarderAPI:
             "mobile_task_runs": 0,
         }
         self._last_scraped_balance = None
+        self._last_run_partial = False
 
         try:
             self._last_mobile_summary = None
@@ -2412,7 +2470,9 @@ class AutoRewarderAPI:
                     pass
 
             if include_mobile_tasks and not self._stop_event.is_set():
-                self._last_mobile_summary = self._run_mobile_tasks(force=mobile_tasks_only)
+                self._last_mobile_summary = self._run_mobile_tasks(
+                    force=mobile_tasks_only
+                )
 
             if mobile_tasks_only:
                 pass
@@ -2435,26 +2495,36 @@ class AutoRewarderAPI:
 
             if self._stop_event.is_set():
                 self.log("Stopped.")
-            elif self._last_mobile_summary is not None and not self._last_mobile_summary.successful:
+            elif (
+                self._last_run_partial
+                or self._last_mobile_summary is not None
+                and not self._last_mobile_summary.successful
+            ):
                 self.log(
-                    f"Done with partial mobile tasks ({self._last_mobile_summary.status}); "
-                    "check mobile_status.json or authorize the account."
+                    "Done with partial tasks; check the activity log and status files."
                 )
             else:
                 self.log("Done!")
 
-                if self.account_meta is not None:
-                    try:
-                        from datetime import date
+            # A non-stopped run is an attempted run even when one task is
+            # partial. Marking it only on total success caused partial mobile
+            # results to repeat all searches on the next scheduled trigger.
+            if (
+                not self._stop_event.is_set()
+                and not mobile_tasks_only
+                and self.account_meta is not None
+            ):
+                try:
+                    from datetime import date
 
-                        current_schedule = self.account_meta.get_schedule()
-                        if isinstance(current_schedule, dict):
-                            current_schedule["last_triggered_date"] = (
-                                date.today().isoformat()
-                            )
-                            self.account_meta.set_schedule(current_schedule)
-                    except Exception as e:
-                        self.log(f"[WARNING] Failed to update deduplication date: {e}")
+                    current_schedule = self.account_meta.get_schedule()
+                    if isinstance(current_schedule, dict):
+                        current_schedule["last_triggered_date"] = (
+                            date.today().isoformat()
+                        )
+                        self.account_meta.set_schedule(current_schedule)
+                except Exception as e:
+                    self.log(f"[WARNING] Failed to update deduplication date: {e}")
         finally:
             # Persist this run's activity + balance before unlocking, so a
             # GUI refresh triggered by enable_start_button() reads fresh stats.
@@ -2544,7 +2614,8 @@ class AutoRewarderAPI:
         """
         if self.daily_set is None:
             self.log("[ERROR] Daily tasks unavailable for this account.")
-            return
+            self._last_run_partial = True
+            return False
 
         if not self.daily_set.should_perform_daily_set():
             self.log(
@@ -2569,12 +2640,14 @@ class AutoRewarderAPI:
             self._try_scrape_balance()
             if self._stop_event.is_set():
                 self.log("Daily tasks aborted by Stop.")
-                return
+                self._last_run_partial = True
+                return False
             if success:
                 self.daily_set.record_attempt(True)
                 self.daily_set.mark_as_completed()
                 self.log("Daily tasks completed and marked as done for today.")
             else:
+                self._last_run_partial = True
                 self.daily_set.record_attempt(False)
                 self.log(
                     "Daily tasks partial; section status saved and the daily marker was not updated."
@@ -2587,8 +2660,9 @@ class AutoRewarderAPI:
                 self.log(f"[WARNING] Error closing driver: {e}")
             self._driver = None
             time.sleep(0.5)
+        return bool(success)
 
-    def _build_queries(self, count):
+    def _build_queries(self, count, max_count=MAX_PC_QUERIES):
         """
         Build the list of queries for a phase.
 
@@ -2608,6 +2682,7 @@ class AutoRewarderAPI:
         """
         if count <= 0:
             return []
+        count = min(max(0, int(count)), max_count)
 
         queries = []
         cfg = self.global_settings.get_llm_config()
@@ -2676,28 +2751,40 @@ class AutoRewarderAPI:
             f"=== {label} phase — {count} {'queries' if count != 1 else 'query'} ==="
         )
 
-        queries_to_search = self._build_queries(count)
+        queries_to_search = self._build_queries(
+            count, MAX_MOBILE_QUERIES if mobile else MAX_PC_QUERIES
+        )
         if not queries_to_search:
             self.log(f"[WARNING] {label}: no queries available. Skipping phase.")
             if self.history is not None:
                 self.history.add_to_history(
                     "N/A", f"[ERROR] {label}: no queries available"
                 )
-            return
+            if not do_daily_set:
+                self._last_run_partial = True
+                return False
 
         self._driver = self.driver_manager.setup_driver(mobile=mobile)
         try:
-            done = self.search_engine.perform_searches(
-                self._driver,
-                queries_to_search,
-                mobile=mobile,
-                stop_event=self._stop_event,
-            )
+            done = 0
+            if queries_to_search:
+                done = self.search_engine.perform_searches(
+                    self._driver,
+                    queries_to_search,
+                    mobile=mobile,
+                    stop_event=self._stop_event,
+                )
             # Tally successful searches against the right platform bucket.
             bucket = "mobile" if mobile else "pc"
             self._session_counts[bucket] += int(done or 0)
+            phase_ok = (count <= 0 and not queries_to_search) or (
+                bool(queries_to_search) and int(done or 0) >= len(queries_to_search)
+            )
+            if not phase_ok and not self._stop_event.is_set():
+                self._last_run_partial = True
 
             ran_daily_set = False
+            daily_ok = True
             if (
                 do_daily_set
                 and not self._stop_event.is_set()
@@ -2709,6 +2796,7 @@ class AutoRewarderAPI:
                     self._driver, human, stop_event=self._stop_event
                 )
                 ran_daily_set = True
+                daily_ok = bool(success)
                 # Record cards + scrape the balance while still on the rewards
                 # dashboard, before the Stop check can short-circuit.
                 totals = self.daily_set.last_totals
@@ -2724,6 +2812,7 @@ class AutoRewarderAPI:
                             "Daily Set tasks completed and marked as done for today."
                         )
                     else:
+                        self._last_run_partial = True
                         self.daily_set.record_attempt(False)
                         self.log(
                             "Daily Set partial; section status saved and the daily marker was not updated."
@@ -2734,6 +2823,7 @@ class AutoRewarderAPI:
             # usable fallback source for the balance.
             if not ran_daily_set and not self._stop_event.is_set():
                 self._try_scrape_balance()
+            return bool(phase_ok and daily_ok)
 
         finally:
             try:

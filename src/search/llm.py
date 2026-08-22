@@ -13,6 +13,7 @@ query file.
 """
 
 import json
+import re
 
 import requests
 
@@ -31,6 +32,8 @@ SUPPORTED_PROVIDERS = tuple(DEFAULT_MODELS.keys())
 
 _TIMEOUT = 30  # seconds, per request
 _ANTHROPIC_VERSION = "2023-06-01"
+_MAX_QUERY_COUNT = 130
+_MAX_QUERY_LENGTH = 256
 
 
 def _max_tokens(count):
@@ -65,8 +68,7 @@ def _log_http_error(logger, provider, resp):
         reason = "billing / quota exhausted"
     else:
         reason = f"HTTP {status}"
-    snippet = (resp.text or "").replace("\n", " ")[:200]
-    logger(f"[WARNING] LLM ({provider}) request failed: {reason}. {snippet}")
+    logger(f"[WARNING] LLM ({provider}) request failed: {reason}.")
 
 
 def _call_openai(prompt, model, api_key, max_tokens, logger):
@@ -161,6 +163,7 @@ def _extract_queries(text, count):
     """
     if not text:
         return []
+    text = str(text)[:1_000_000]
 
     start = text.find("[")
     end = text.rfind("]")
@@ -180,6 +183,9 @@ def _extract_queries(text, count):
     for item in data:
         if isinstance(item, str):
             query = item.strip().strip('"').strip()
+            query = "".join(
+                char for char in query if ord(char) >= 32 and ord(char) != 127
+            )[:_MAX_QUERY_LENGTH]
             if query:
                 out.append(query)
 
@@ -209,6 +215,7 @@ def generate_queries(
         return []
     if count <= 0 or not api_key:
         return []
+    count = min(_MAX_QUERY_COUNT, count)
 
     provider = (provider or "openai").strip().lower()
     caller = _DISPATCH.get(provider)
@@ -217,14 +224,21 @@ def generate_queries(
             logger(f"[WARNING] LLM: unsupported provider '{provider}'.")
         return []
 
-    model = (model or "").strip() or DEFAULT_MODELS[provider]
+    model = (model or "").strip()
+    if model and (len(model) > 100 or not re.fullmatch(r"[A-Za-z0-9._:/-]+", model)):
+        if logger:
+            logger(
+                f"[WARNING] LLM ({provider}) model id is invalid; using the provider default."
+            )
+        model = ""
+    model = model or DEFAULT_MODELS[provider]
     prompt = _build_prompt(count, locale)
 
     try:
         text = caller(prompt, model, api_key, _max_tokens(count), logger)
-    except requests.RequestException as e:
+    except requests.RequestException:
         if logger:
-            logger(f"[WARNING] LLM ({provider}) network error: {e}")
+            logger(f"[WARNING] LLM ({provider}) network error; using static queries.")
         return []
     except (KeyError, IndexError, ValueError, TypeError) as e:
         if logger:

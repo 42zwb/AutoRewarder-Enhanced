@@ -8,6 +8,7 @@ and helpers to resolve per-account file paths (Edge profile, history, status, me
 
 import os
 import platform
+import re
 import sys
 
 CURRENT_VERSION = "v4.1"
@@ -62,6 +63,7 @@ if not os.path.exists(APP_DIR):
 #         mobile_token.bin   (DPAPI-protected OAuth refresh token)
 ACCOUNTS_DIR = os.path.join(APP_DIR, "accounts")
 GLOBAL_SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+LLM_API_KEY_PATH = os.path.join(APP_DIR, "llm_api_key.bin")
 ACCOUNTS_INDEX_PATH = os.path.join(APP_DIR, "accounts.json")
 JSON_FILE_PATH = os.path.join(ASSETS_DIR, "queries.json")
 
@@ -78,6 +80,10 @@ LOG_MAX_SIZE = 6 * 1024 * 1024  # 6 MB
 
 def account_dir(account_id):
     """Return the directory holding all files for a given account."""
+    if not isinstance(account_id, str) or not account_id:
+        raise ValueError("Invalid account id")
+    if len(account_id) > 64 or not re.fullmatch(r"[A-Za-z0-9_-]+", account_id):
+        raise ValueError("Invalid account id")
     return os.path.join(ACCOUNTS_DIR, account_id)
 
 

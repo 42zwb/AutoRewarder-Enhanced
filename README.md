@@ -14,6 +14,7 @@ AutoRewarder Enhanced is a Windows-oriented desktop automation project for Micro
 - Daily Set and More Activities processing with DOM/RSC status checks, post-click verification, and bounded retries.
 - Optional mobile check-in and Read to Earn activities through the Rewards activity API.
 - Interactive OAuth authorization in the account's visible Edge profile; refresh tokens are protected with Windows DPAPI and access tokens stay in memory.
+- Optional LLM API keys are stored outside `settings.json` (Windows DPAPI; mode-600 file for non-Windows development).
 - Per-account `mobile_status.json` state with `completed`, `already_done`, `partial`, `unavailable`, `auth_required`, `failed`, and `stopped` outcomes.
 - GUI controls for mobile-task settings and a diagnostic “Mobile tasks only” run.
 - Headless CLI flags for mobile-only runs and safe fallback without mobile API tasks.
@@ -73,6 +74,7 @@ AutoRewarder 增强版是基于 [safarsin/AutoRewarder](https://github.com/safar
 - 执行 Daily Set 和 More Activities，并在点击后重新检查状态，最多有限重试。
 - 可选执行移动签到和“阅读以赚取”任务。
 - 首次授权使用可见 Edge 交互完成；刷新令牌使用 Windows DPAPI 保护，访问令牌只保存在内存中。
+- 可选的 LLM API Key 不再写入 `settings.json`；Windows 使用 DPAPI，非 Windows 开发环境使用独立的 `600` 权限文件。
 - 每个账号保存 `mobile_status.json`，明确记录完成、已完成、部分完成、不可用、需要授权、失败和停止等状态。
 - 设置页提供移动任务配置和“仅运行移动任务”诊断入口。
 - CLI 支持移动任务专用运行，以及跳过移动 API 的人工回退模式。

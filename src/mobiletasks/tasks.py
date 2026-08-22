@@ -3,7 +3,12 @@
 import random
 import time
 
-from .client import activity_says_done, extract_balance, extract_locale, extract_read_offer_id
+from .client import (
+    activity_says_done,
+    extract_balance,
+    extract_locale,
+    extract_read_offer_id,
+)
 from .models import MobileTaskResult
 
 
@@ -65,7 +70,9 @@ class DailyCheckInTask(_TaskBase):
         if not self.config.get("check_in_enabled", True):
             entry["status"] = "stopped"
             self._save(status_data)
-            return MobileTaskResult("check_in", "stopped", reason="disabled by configuration")
+            return MobileTaskResult(
+                "check_in", "stopped", reason="disabled by configuration"
+            )
 
         current_status = entry.get("status")
         if current_status in ("completed", "already_done"):
@@ -79,7 +86,9 @@ class DailyCheckInTask(_TaskBase):
         country, _language = extract_locale(profile)
         if not country:
             return MobileTaskResult(
-                "check_in", "unavailable", reason="current Rewards region was not returned"
+                "check_in",
+                "unavailable",
+                reason="current Rewards region was not returned",
             )
 
         before = extract_balance(profile)
@@ -200,7 +209,9 @@ class ReadToEarnTask(_TaskBase):
             if delta is None or delta <= 0:
                 entry["status"] = "partial"
                 self._save(status_data)
-                reason = "no positive balance delta; stopped to avoid duplicate submissions"
+                reason = (
+                    "no positive balance delta; stopped to avoid duplicate submissions"
+                )
                 if response.completed:
                     reason = "API reports completed but balance did not increase"
                 return MobileTaskResult(
@@ -210,7 +221,9 @@ class ReadToEarnTask(_TaskBase):
             gained_total += delta
             articles = index + 1
             balance = new_balance
-            entry.update({"status": "partial", "articles": articles, "points": gained_total})
+            entry.update(
+                {"status": "partial", "articles": articles, "points": gained_total}
+            )
             self._save(status_data)
             if gained_total >= target:
                 entry["status"] = "completed"

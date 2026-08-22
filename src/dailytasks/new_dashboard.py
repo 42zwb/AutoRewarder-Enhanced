@@ -21,6 +21,8 @@ from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
+from ..security import is_safe_rewards_url
+
 DASHBOARD_URL = "https://rewards.bing.com/dashboard"
 EARN_URL = "https://rewards.bing.com/earn"
 
@@ -274,6 +276,7 @@ class NewDashboardDailySet:
         self.more_status = "unknown"
         self.more_total = 0
         self.more_completed = 0
+        self.daily_status = "unknown"
 
     def _log(self, message):
         if self.logger:
@@ -518,6 +521,11 @@ class NewDashboardDailySet:
             if new_tabs:
                 for tab in new_tabs:
                     driver.switch_to.window(tab)
+                    tab_url = driver.current_url or ""
+                    if not is_safe_rewards_url(tab_url):
+                        self._log("[INFO] Closing an untrusted auxiliary tab.")
+                        driver.close()
+                        continue
                     # Dwell so the rewards credit beacon on the search page fires.
                     time.sleep(random.uniform(3, 6))
                     try:
@@ -533,6 +541,12 @@ class NewDashboardDailySet:
             if driver.current_url != cur_url:
                 # Opened in the same tab: dwell, then return to the caller's
                 # page/section so its remaining anchors stay discoverable.
+                if not is_safe_rewards_url(driver.current_url or ""):
+                    self._log("[INFO] Refusing an untrusted same-tab destination.")
+                    driver.get(return_url)
+                    self._wait_ready(driver)
+                    self._expand_section(driver, section_id)
+                    return False
                 time.sleep(random.uniform(3, 6))
                 try:
                     human.scroll_page()
@@ -649,7 +663,26 @@ class NewDashboardDailySet:
         (/earn). Returns the Daily Set outcome (used to mark today done); the
         claim/earn/quest passes are best-effort.
         """
+        self.daily_status = "unknown"
+        self.last_totals = {
+            "already": 0,
+            "newly": 0,
+            "final": 0,
+            "total": 0,
+            "attempted": 0,
+            "earn": 0,
+            "quests": 0,
+        }
         daily_ok = self._run_daily_set(driver, human, stop_event=stop_event)
+        self.daily_status = (
+            "completed"
+            if daily_ok
+            else (
+                "stopped"
+                if stop_event is not None and stop_event.is_set()
+                else "unavailable" if not self.last_totals.get("total") else "partial"
+            )
+        )
         if stop_event is not None and stop_event.is_set():
             return daily_ok
         try:
@@ -809,12 +842,16 @@ class NewDashboardDailySet:
                         f"[WARNING] 'earn-page' moreactivities section did not load on pass {pass_index + 1}."
                     )
                     continue
-                time.sleep(random.uniform(1.5 + pass_index * 0.5, 2.5 + pass_index * 0.5))
+                time.sleep(
+                    random.uniform(1.5 + pass_index * 0.5, 2.5 + pass_index * 0.5)
+                )
                 self._expand_section(driver, "moreactivities")
                 time.sleep(random.uniform(0.5, 1.0))
                 items = driver.execute_script(_MORE_ACTIVITIES_JS)
             except Exception as e:
-                self._log(f"[WARNING] Could not read 'earn-page' cards on pass {pass_index + 1}: {e}")
+                self._log(
+                    f"[WARNING] Could not read 'earn-page' cards on pass {pass_index + 1}: {e}"
+                )
                 continue
 
             if not isinstance(items, list):
@@ -824,7 +861,7 @@ class NewDashboardDailySet:
                 if not isinstance(item, dict):
                     continue
                 dest = item.get("destination")
-                if isinstance(dest, str) and dest.startswith("http"):
+                if isinstance(dest, str) and is_safe_rewards_url(dest):
                     current[dest.split("#", 1)[0]] = item
             try:
                 diagnostics = driver.execute_script(_MORE_ACTIVITIES_DIAG_JS) or {}
@@ -849,7 +886,9 @@ class NewDashboardDailySet:
             if not current:
                 self.more_completed = self.more_total
                 self.more_status = "completed"
-                self._log(f"'earn-page': all {self.more_total} activity(ies) verified complete.")
+                self._log(
+                    f"'earn-page': all {self.more_total} activity(ies) verified complete."
+                )
                 break
 
             self._log(
@@ -876,7 +915,9 @@ class NewDashboardDailySet:
                     attempted += 1
                     continue
 
-                self._log(f"[INFO] Falling back to direct navigation for '{title}' (not counted until verified).")
+                self._log(
+                    f"[INFO] Falling back to direct navigation for '{title}' (not counted until verified)."
+                )
                 try:
                     driver.get(dest)
                     attempted += 1
@@ -967,7 +1008,11 @@ class NewDashboardDailySet:
             if not isinstance(q, dict):
                 continue
             url = q.get("url")
-            if not isinstance(url, str) or "/earn/quest/" not in url:
+            if (
+                not isinstance(url, str)
+                or "/earn/quest/" not in url
+                or not is_safe_rewards_url(url)
+            ):
                 continue
             pts = q.get("points")
             if not isinstance(pts, int) or pts <= 0:
@@ -1026,7 +1071,7 @@ class NewDashboardDailySet:
                     break
                 dest = task.get("destination")
                 ttitle = task.get("title") or "task"
-                if not isinstance(dest, str) or not dest.startswith("http"):
+                if not isinstance(dest, str) or not is_safe_rewards_url(dest):
                     continue
                 self._log(f"Opening quest task: {ttitle}")
                 anchor = self._locate_quest_task(driver, dest)
@@ -1133,8 +1178,8 @@ class NewDashboardDailySet:
 
                 destination = item.get("destination")
                 title = item.get("title") or item.get("offerId") or "activity"
-                if not isinstance(destination, str) or not destination.startswith(
-                    "http"
+                if not isinstance(destination, str) or not is_safe_rewards_url(
+                    destination
                 ):
                     self._log(f"[WARNING] Skipping '{title}': no valid destination.")
                     continue

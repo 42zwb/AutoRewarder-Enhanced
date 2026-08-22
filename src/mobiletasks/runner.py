@@ -11,8 +11,9 @@ from .client import (
     RewardsUnavailableError,
     extract_locale,
 )
-from .models import MobileTaskResult, MobileTaskSummary, RESULT_STATUSES
+from .models import MobileTaskSummary, RESULT_STATUSES
 from .oauth import OAuthError, OAuthManager
+from ..security import atomic_write_json
 from .tasks import DailyCheckInTask, ReadToEarnTask
 
 DEFAULT_MOBILE_TASKS = {
@@ -28,11 +29,7 @@ DEFAULT_MOBILE_TASKS = {
 
 
 def _atomic_write(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp_path = path + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, indent=2, ensure_ascii=False)
-    os.replace(temp_path, path)
+    atomic_write_json(path, data, indent=2)
 
 
 class MobileTaskRunner:
@@ -108,7 +105,9 @@ class MobileTaskRunner:
             with open(self.status_path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
         except (OSError, ValueError, json.JSONDecodeError):
-            self._log("[WARNING] mobile_status.json is unreadable; starting a fresh mobile status.")
+            self._log(
+                "[WARNING] mobile_status.json is unreadable; starting a fresh mobile status."
+            )
             return self._new_status()
         if not isinstance(data, dict) or data.get("date") != date.today().isoformat():
             return self._new_status()
@@ -122,6 +121,47 @@ class MobileTaskRunner:
         # even when the persisted file was created with a different target.
         fresh["read_to_earn"]["target_points"] = self._target_points()
         fresh["read_to_earn"]["target_articles"] = self._max_articles()
+        valid_statuses = set(RESULT_STATUSES)
+
+        def _status(value, fallback="stopped"):
+            return (
+                value
+                if isinstance(value, str) and value in valid_statuses
+                else fallback
+            )
+
+        def _number(value, maximum):
+            try:
+                return max(0, min(maximum, int(value)))
+            except (TypeError, ValueError, OverflowError):
+                return 0
+
+        fresh["check_in"]["status"] = _status(fresh["check_in"].get("status"))
+        fresh["check_in"]["points"] = _number(fresh["check_in"].get("points"), 10000)
+        fresh["read_to_earn"]["status"] = _status(fresh["read_to_earn"].get("status"))
+        fresh["read_to_earn"]["articles"] = _number(
+            fresh["read_to_earn"].get("articles"), self._max_articles()
+        )
+        fresh["read_to_earn"]["points"] = _number(
+            fresh["read_to_earn"].get("points"), self._target_points()
+        )
+        fresh["result"] = _status(fresh.get("result"))
+        fresh["reason"] = str(fresh.get("reason") or "")[:500]
+        fresh["last_attempt_at"] = str(fresh.get("last_attempt_at") or "")[:64]
+        # A persisted success marker is meaningful only when each enabled
+        # subtask also has a success marker. This prevents a damaged/manual
+        # status file from suppressing today's work.
+        enabled_statuses = []
+        if self.config.get("check_in_enabled", True):
+            enabled_statuses.append(fresh["check_in"]["status"])
+        if self.config.get("read_to_earn_enabled", True):
+            enabled_statuses.append(fresh["read_to_earn"]["status"])
+        if fresh["result"] in ("completed", "already_done") and not enabled_statuses:
+            fresh["result"] = "unavailable"
+        elif fresh["result"] in ("completed", "already_done") and not all(
+            value in ("completed", "already_done") for value in enabled_statuses
+        ):
+            fresh["result"] = "partial"
         return fresh
 
     def _save_status(self, status):
@@ -206,18 +246,39 @@ class MobileTaskRunner:
         status_data["read_to_earn"]["target_points"] = self._target_points()
         status_data["read_to_earn"]["target_articles"] = self._max_articles()
         if not self.config.get("enabled", True):
-            self._set_result("unavailable", "stopped", "stopped", "mobile tasks disabled by configuration", status_data)
+            self._set_result(
+                "unavailable",
+                "stopped",
+                "stopped",
+                "mobile tasks disabled by configuration",
+                status_data,
+            )
+            return self._summary(status_data)
+        if not self.config.get("check_in_enabled", True) and not self.config.get(
+            "read_to_earn_enabled", True
+        ):
+            self._set_result(
+                "unavailable",
+                "stopped",
+                "stopped",
+                "all mobile tasks disabled by configuration",
+                status_data,
+            )
             return self._summary(status_data)
         if not force and status_data.get("result") in ("completed", "already_done"):
             return self._summary(status_data)
         if self.stop_event is not None and self.stop_event.is_set():
-            self._set_result("stopped", "stopped", "stopped", "stop requested", status_data)
+            self._set_result(
+                "stopped", "stopped", "stopped", "stop requested", status_data
+            )
             return self._summary(status_data)
         self.oauth = self._build_oauth()
         try:
             token = self.oauth.get_access_token()
         except OAuthError as exc:
-            self._set_result("auth_required", "auth_required", "auth_required", str(exc), status_data)
+            self._set_result(
+                "auth_required", "auth_required", "auth_required", str(exc), status_data
+            )
             return self._summary(status_data)
         try:
             client = self.client_factory(
@@ -234,7 +295,13 @@ class MobileTaskRunner:
                 client.language = language
             check_result = self._check_in(client, profile, status_data)
             if check_result.status in ("unavailable", "failed"):
-                self._set_result(check_result.status, check_result.status, "stopped", check_result.reason, status_data)
+                self._set_result(
+                    check_result.status,
+                    check_result.status,
+                    "stopped",
+                    check_result.reason,
+                    status_data,
+                )
                 return self._summary(status_data)
             balance = profile_response.balance
             if check_result.status == "completed" and balance is not None:
@@ -245,31 +312,59 @@ class MobileTaskRunner:
             read_result = self._read_to_earn(client, profile, status_data, balance)
             check_status = status_data["check_in"].get("status", check_result.status)
             read_status = status_data["read_to_earn"].get("status", read_result.status)
-            if read_result.status in ("failed", "unavailable", "auth_required"):
-                overall = read_result.status
-            elif (
-                (not self.config.get("check_in_enabled", True)
-                 or check_status in ("completed", "already_done", "stopped"))
-                and (not self.config.get("read_to_earn_enabled", True)
-                     or read_status in ("completed", "already_done", "stopped"))
+            enabled_statuses = []
+            if self.config.get("check_in_enabled", True):
+                enabled_statuses.append(check_status)
+            if self.config.get("read_to_earn_enabled", True):
+                enabled_statuses.append(read_status)
+            if not enabled_statuses:
+                overall = "unavailable"
+            elif self.stop_event is not None and self.stop_event.is_set():
+                overall = "stopped"
+            elif "auth_required" in enabled_statuses:
+                overall = "auth_required"
+            elif "failed" in enabled_statuses:
+                overall = "failed"
+            elif "unavailable" in enabled_statuses:
+                overall = "unavailable"
+            elif "partial" in enabled_statuses:
+                overall = "partial"
+            elif "stopped" in enabled_statuses:
+                overall = "stopped"
+            elif all(
+                status in ("completed", "already_done") for status in enabled_statuses
             ):
-                overall = "completed"
-            elif check_status in ("partial", "failed") or read_status in ("partial", "stopped"):
-                overall = "partial" if not (self.stop_event and self.stop_event.is_set()) else "stopped"
+                overall = (
+                    "already_done"
+                    if all(status == "already_done" for status in enabled_statuses)
+                    else "completed"
+                )
             else:
-                overall = "already_done" if check_status == "already_done" and read_status == "already_done" else "partial"
-            reason = "; ".join(part for part in (check_result.reason, read_result.reason) if part)
+                overall = "partial"
+            reason = "; ".join(
+                part for part in (check_result.reason, read_result.reason) if part
+            )
             self._set_result(overall, check_status, read_status, reason, status_data)
             return self._summary(status_data)
         except RewardsAuthError as exc:
-            self._set_result("auth_required", "auth_required", "auth_required", str(exc), status_data)
+            self._set_result(
+                "auth_required", "auth_required", "auth_required", str(exc), status_data
+            )
             return self._summary(status_data)
         except RewardsUnavailableError as exc:
-            self._set_result("unavailable", "unavailable", "unavailable", str(exc), status_data)
+            self._set_result(
+                "unavailable", "unavailable", "unavailable", str(exc), status_data
+            )
             return self._summary(status_data)
         except RewardsClientError as exc:
             self._set_result("failed", "failed", "failed", str(exc), status_data)
             return self._summary(status_data)
         except Exception as exc:
-            self._set_result("failed", "failed", "failed", f"unexpected mobile task error: {exc}", status_data)
+            self._set_result(
+                "failed",
+                "failed",
+                "failed",
+                f"unexpected mobile task error: {exc}",
+                status_data,
+            )
             return self._summary(status_data)

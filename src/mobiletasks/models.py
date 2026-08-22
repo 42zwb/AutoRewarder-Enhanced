@@ -93,7 +93,9 @@ class MobileTaskSummary:
             read_points=read.get("points", data.get("read_points", 0)),
             read_articles=read.get("articles", data.get("read_articles", 0)),
             target_points=read.get("target_points", data.get("target_points", 30)),
-            target_articles=read.get("target_articles", data.get("target_articles", 10)),
+            target_articles=read.get(
+                "target_articles", data.get("target_articles", 10)
+            ),
             reason=data.get("reason", ""),
             last_attempt_at=data.get("last_attempt_at", ""),
         )

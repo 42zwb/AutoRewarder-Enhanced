@@ -63,7 +63,11 @@ def extract_balance(payload):
     for obj in _walk(payload):
         for key in preferred:
             value = obj.get(key)
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value >= 0
+            ):
                 return int(value)
             if isinstance(value, str) and value.isdigit():
                 return int(value)
@@ -79,7 +83,18 @@ def response_says_done(payload):
                 return True
         for key in ("status", "state", "message", "result"):
             value = obj.get(key)
-            if isinstance(value, str) and re.search(r"already|complete|claimed|done", value, re.I):
+            if not isinstance(value, str):
+                continue
+            normalized = re.sub(r"[_-]+", " ", value).strip().lower()
+            if re.search(
+                r"\b(?:not|never|incomplete|pending|failed|failure|error|unclaimed|unavailable)\b",
+                normalized,
+            ):
+                continue
+            if re.search(
+                r"\b(?:already\s+(?:done|complete|claimed)|completed?|claimed|done|success(?:ful|fully)?)\b",
+                normalized,
+            ):
                 return True
     return False
 
@@ -198,9 +213,13 @@ class RewardsActivityClient:
                 )
             except requests.RequestException as exc:
                 if attempt + 1 >= self.max_retries:
-                    raise RewardsClientError(f"Rewards API network error: {exc}") from exc
+                    raise RewardsClientError(
+                        f"Rewards API network error: {exc}"
+                    ) from exc
                 delay = min(30.0, 2**attempt + random.uniform(0.1, 0.8))
-                self._log(f"Mobile activity network retry {attempt + 1}/{self.max_retries} after {delay:.1f}s.")
+                self._log(
+                    f"Mobile activity network retry {attempt + 1}/{self.max_retries} after {delay:.1f}s."
+                )
                 time.sleep(delay)
                 continue
 
@@ -208,38 +227,62 @@ class RewardsActivityClient:
                 if not refreshed and self.token_refresh is not None:
                     refreshed = True
                     try:
-                        self.access_token = self.token_refresh()
+                        refreshed_token = self.token_refresh()
                     except Exception as exc:
-                        raise RewardsAuthError("Mobile OAuth refresh was rejected") from exc
+                        raise RewardsAuthError(
+                            "Mobile OAuth refresh was rejected"
+                        ) from exc
+                    if (
+                        not isinstance(refreshed_token, str)
+                        or not refreshed_token.strip()
+                    ):
+                        raise RewardsAuthError(
+                            "Mobile OAuth refresh returned no access token"
+                        )
+                    self.access_token = refreshed_token.strip()
                     continue
-                raise RewardsAuthError(f"Mobile activity authorization rejected (HTTP {response.status_code})")
+                raise RewardsAuthError(
+                    f"Mobile activity authorization rejected (HTTP {response.status_code})"
+                )
 
             if response.status_code == 429 or response.status_code >= 500:
                 if attempt + 1 >= self.max_retries:
-                    raise RewardsClientError(f"Mobile activity endpoint returned HTTP {response.status_code}")
+                    raise RewardsClientError(
+                        f"Mobile activity endpoint returned HTTP {response.status_code}"
+                    )
                 retry_after = response.headers.get("Retry-After")
                 try:
                     delay = float(retry_after)
                 except (TypeError, ValueError):
                     delay = 2**attempt + random.uniform(0.1, 0.8)
                 delay = min(30.0, max(0.5, delay))
-                self._log(f"Mobile activity HTTP {response.status_code}; retry {attempt + 1}/{self.max_retries} after {delay:.1f}s.")
+                self._log(
+                    f"Mobile activity HTTP {response.status_code}; retry {attempt + 1}/{self.max_retries} after {delay:.1f}s."
+                )
                 time.sleep(delay)
                 continue
 
             if response.status_code >= 400:
-                raise RewardsClientError(f"Mobile activity endpoint returned HTTP {response.status_code}")
+                raise RewardsClientError(
+                    f"Mobile activity endpoint returned HTTP {response.status_code}"
+                )
             try:
                 data = response.json()
             except ValueError as exc:
-                raise RewardsClientError("Mobile activity endpoint returned invalid JSON") from exc
+                raise RewardsClientError(
+                    "Mobile activity endpoint returned invalid JSON"
+                ) from exc
             if not isinstance(data, dict):
-                raise RewardsClientError("Mobile activity response schema is not an object")
+                raise RewardsClientError(
+                    "Mobile activity response schema is not an object"
+                )
             return ActivityResponse(response.status_code, data)
         raise RewardsClientError("Mobile activity request exhausted retries")
 
     def get_profile(self):
-        return self._request("GET", PROFILE_PATH, params={"channel": "SAIOS", "options": "613"})
+        return self._request(
+            "GET", PROFILE_PATH, params={"channel": "SAIOS", "options": "613"}
+        )
 
     def submit_activity(self, activity_type, country, offer_id=None):
         attributes = {}
@@ -256,5 +299,7 @@ class RewardsActivityClient:
         }
         # Deliberately do not log body or headers: a request id is enough for
         # diagnostics and avoids leaking account-specific activity data.
-        self._log(f"Submitting mobile activity type={int(activity_type)} request_id={body['id']}")
+        self._log(
+            f"Submitting mobile activity type={int(activity_type)} request_id={body['id']}"
+        )
         return self._request("POST", ACTIVITIES_PATH, payload=body)

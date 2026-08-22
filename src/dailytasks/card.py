@@ -15,6 +15,7 @@ Failures (stale element, JS error) are swallowed with sensible defaults:
 
 import random
 import time
+from urllib.parse import urljoin
 
 from selenium.webdriver.common.by import By
 
@@ -28,6 +29,7 @@ from .card_js import (
     CARD_VISIBLE_JS,
     CardStatus,
 )
+from ..security import is_safe_rewards_url
 
 # Inner anchor used by Rewards cards. We click this rather than the card root
 # because (a) the root often re-renders to 0x0 during SPA updates, and (b)
@@ -183,6 +185,16 @@ class RewardsCard:
         click_target = self.pick_click_target(card)
 
         try:
+            # Keep legacy javascript/# handlers, but reject explicit external
+            # schemes or hosts before dispatching a page-provided href.
+            main_url = self.driver.current_url or ""
+            href = (click_target.get_attribute("href") or "").strip()
+            if href and not href.lower().startswith(("javascript:", "#")):
+                resolved = urljoin(main_url, href)
+                if not is_safe_rewards_url(resolved):
+                    self._log("[INFO] Refusing an untrusted Rewards card target.")
+                    return False
+
             # Skip elements that are temporarily 0x0 (Rewards SPA re-renders a lot).
             try:
                 w, h = self.driver.execute_script(
@@ -223,6 +235,18 @@ class RewardsCard:
             human.click_element(click_target, scroll_into_view=False)
             time.sleep(random.uniform(2, 4))
 
+            # A legacy card may navigate in the main tab instead of opening a
+            # new one. Reject an untrusted same-tab destination as well.
+            current_url = self.driver.current_url or ""
+            if (
+                main_url
+                and current_url != main_url
+                and not is_safe_rewards_url(current_url)
+            ):
+                self._log("[INFO] Refusing an untrusted same-tab card destination.")
+                self.driver.get(main_url)
+                return False
+
             new_tabs = [
                 h
                 for h in self.driver.window_handles
@@ -230,6 +254,10 @@ class RewardsCard:
             ]
             for tab in new_tabs:
                 self.driver.switch_to.window(tab)
+                if not is_safe_rewards_url(self.driver.current_url or ""):
+                    self._log("[INFO] Closing an untrusted auxiliary tab.")
+                    self.driver.close()
+                    continue
                 time.sleep(random.uniform(2, 4))
                 human.scroll_page()
                 self.driver.close()

@@ -19,7 +19,10 @@ recovery (back up + reset) when the JSON file is unreadable.
 
 import os
 import json
+import re
 from datetime import datetime
+
+from ..security import atomic_write_json
 
 # Microsoft Rewards awards roughly these points per item. Used ONLY for the
 # estimated-points figure shown when no real balance has been scraped yet;
@@ -31,6 +34,17 @@ POINTS_PER_CARD = 10
 # Stored as per-day aggregates (not per-run), so heavy advanced-scheduling days
 # — which fire one session per query — can't evict older days.
 _DAILY_KEEP = 90
+_MAX_STATS_BYTES = 4 * 1024 * 1024
+
+
+def _nonnegative_int(value, maximum=1_000_000_000):
+    try:
+        if isinstance(value, bool):
+            return 0
+        return max(0, min(maximum, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
 
 # JS executed on rewards.bing.com (or a Bing SERP) to read the user's current
 # available-points balance. Works on both the legacy mee-rewards-* dashboard
@@ -291,15 +305,15 @@ class StatsManager:
                     "runs": 0,
                 },
             )
-            bucket["pc"] += int(r.get("pc", 0) or 0)
-            bucket["mobile"] += int(r.get("mobile", 0) or 0)
-            bucket["cards"] += int(r.get("cards", 0) or 0)
-            bucket["earn"] += int(r.get("earn", 0) or 0)
-            bucket["quests"] += int(r.get("quests", 0) or 0)
-            bucket["check_ins"] += int(r.get("check_ins", 0) or 0)
-            bucket["read_articles"] += int(r.get("read_articles", 0) or 0)
-            bucket["read_points"] += int(r.get("read_points", 0) or 0)
-            bucket["mobile_task_runs"] += int(r.get("mobile_task_runs", 0) or 0)
+            bucket["pc"] += _nonnegative_int(r.get("pc", 0))
+            bucket["mobile"] += _nonnegative_int(r.get("mobile", 0))
+            bucket["cards"] += _nonnegative_int(r.get("cards", 0))
+            bucket["earn"] += _nonnegative_int(r.get("earn", 0))
+            bucket["quests"] += _nonnegative_int(r.get("quests", 0))
+            bucket["check_ins"] += _nonnegative_int(r.get("check_ins", 0))
+            bucket["read_articles"] += _nonnegative_int(r.get("read_articles", 0))
+            bucket["read_points"] += _nonnegative_int(r.get("read_points", 0))
+            bucket["mobile_task_runs"] += _nonnegative_int(r.get("mobile_task_runs", 0))
             bucket["runs"] += 1
         return daily
 
@@ -320,6 +334,80 @@ class StatsManager:
             merged["daily"] = self._trim_daily(dict(daily))
         elif isinstance(data.get("runs"), list):
             merged["daily"] = self._trim_daily(self._daily_from_runs(data["runs"]))
+
+        lifetime_fields = (
+            "pc_searches",
+            "mobile_searches",
+            "daily_cards",
+            "earn_cards",
+            "quest_tasks",
+            "check_ins",
+            "read_articles",
+            "read_points",
+            "mobile_task_runs",
+            "runs",
+            "points_estimate",
+        )
+        for field in lifetime_fields:
+            merged["lifetime"][field] = _nonnegative_int(merged["lifetime"].get(field))
+        for field in (
+            "pc_searches",
+            "mobile_searches",
+            "daily_cards",
+            "earn_cards",
+            "quest_tasks",
+            "check_ins",
+            "read_articles",
+            "read_points",
+            "mobile_task_runs",
+            "runs",
+            "points_estimate",
+        ):
+            merged["last_session"][field] = _nonnegative_int(
+                merged["last_session"].get(field), 1_000_000
+            )
+        delta = merged["last_session"].get("points_delta")
+        try:
+            merged["last_session"]["points_delta"] = (
+                int(delta)
+                if isinstance(delta, (int, float)) and not isinstance(delta, bool)
+                else None
+            )
+        except (TypeError, ValueError, OverflowError):
+            merged["last_session"]["points_delta"] = None
+        for field in ("current", "previous"):
+            value = merged["balance"].get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    merged["balance"][field] = _nonnegative_int(value)
+                except (TypeError, ValueError, OverflowError):
+                    merged["balance"][field] = None
+            elif isinstance(value, str) and value.isdigit():
+                merged["balance"][field] = _nonnegative_int(value)
+            else:
+                merged["balance"][field] = None
+        merged["balance"]["updated_at"] = (
+            str(merged["balance"].get("updated_at") or "")[:64] or None
+        )
+        for day, bucket in list(merged["daily"].items()):
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)) or not isinstance(
+                bucket, dict
+            ):
+                merged["daily"].pop(day, None)
+                continue
+            for field in (
+                "pc",
+                "mobile",
+                "cards",
+                "earn",
+                "quests",
+                "check_ins",
+                "read_articles",
+                "read_points",
+                "mobile_task_runs",
+                "runs",
+            ):
+                bucket[field] = _nonnegative_int(bucket.get(field))
         return merged
 
     def get_stats(self):
@@ -328,7 +416,15 @@ class StatsManager:
         structure if the file is missing; recovers (back up + reset) if it is
         unreadable, mirroring HistoryManager.
         """
-        if not os.path.exists(self.stats_file) or os.path.getsize(self.stats_file) == 0:
+        try:
+            size = (
+                os.path.getsize(self.stats_file)
+                if os.path.exists(self.stats_file)
+                else 0
+            )
+        except OSError:
+            size = 0
+        if size == 0 or size > _MAX_STATS_BYTES:
             return self._default()
 
         try:
@@ -337,25 +433,24 @@ class StatsManager:
                 if not isinstance(data, dict):
                     raise ValueError("Stats data must be an object")
                 return self._merge_defaults(data)
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError, OSError):
             self._log(
                 "[ERROR] Stats file was unreadable or damaged. Starting with a fresh one."
             )
             backup_path = self.stats_file + ".backup"
-            if os.path.exists(backup_path):
-                os.remove(backup_path)
-            os.replace(self.stats_file, backup_path)
+            try:
+                if os.path.exists(backup_path):
+                    os.remove(backup_path)
+                os.replace(self.stats_file, backup_path)
+            except OSError:
+                pass
             fresh = self._default()
             self.save_stats(fresh)
             return fresh
 
     def save_stats(self, data):
         """Save the statistics to the JSON file atomically via a temp file."""
-        os.makedirs(os.path.dirname(self.stats_file), exist_ok=True)
-        temp_file = self.stats_file + ".tmp"
-        with open(temp_file, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=4)
-        os.replace(temp_file, self.stats_file)
+        atomic_write_json(self.stats_file, data)
 
     def update_balance(self, balance):
         """
@@ -372,6 +467,11 @@ class StatsManager:
         if balance is None:
             return self.get_stats()
 
+        try:
+            balance = _nonnegative_int(balance)
+        except (TypeError, ValueError, OverflowError):
+            self._log("[WARNING] Ignoring an invalid points balance.")
+            return self.get_stats()
         stats = self.get_stats()
         stats["balance"]["previous"] = stats["balance"]["current"]
         stats["balance"]["current"] = int(balance)
@@ -412,15 +512,17 @@ class StatsManager:
         Returns:
             dict: the updated stats structure (also persisted to disk).
         """
-        pc = max(0, int(pc_searches or 0))
-        mobile = max(0, int(mobile_searches or 0))
-        cards = max(0, int(daily_cards or 0))
-        earn = max(0, int(earn_cards or 0))
-        quests = max(0, int(quest_tasks or 0))
-        checkin = max(0, int(check_ins or 0))
-        articles = max(0, int(read_articles or 0))
-        read_credit = max(0, int(read_points or 0))
-        mobile_runs = max(0, int(mobile_task_runs or 0))
+        pc = _nonnegative_int(pc_searches, 130)
+        mobile = _nonnegative_int(mobile_searches, 99)
+        cards = _nonnegative_int(daily_cards, 1000)
+        earn = _nonnegative_int(earn_cards, 1000)
+        quests = _nonnegative_int(quest_tasks, 1000)
+        checkin = _nonnegative_int(check_ins, 10)
+        articles = _nonnegative_int(read_articles, 10)
+        read_credit = _nonnegative_int(read_points, 1000)
+        mobile_runs = _nonnegative_int(mobile_task_runs, 100)
+        if balance is not None:
+            balance = _nonnegative_int(balance)
 
         # Nothing happened (e.g. an empty batch in advanced scheduling and no
         # balance to refresh) — don't pollute the timeline with a no-op run.

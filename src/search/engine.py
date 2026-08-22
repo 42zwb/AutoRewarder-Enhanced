@@ -10,6 +10,10 @@ from selenium.webdriver.common.by import By
 
 from ..utils import human_typing
 from ..emulator import HumanBehavior
+from ..security import safe_log_text
+
+_MAX_QUERY_LENGTH = 256
+_MAX_QUERY_COUNT = 130
 
 
 class SearchEngine:
@@ -66,9 +70,21 @@ class SearchEngine:
         """
 
         try:
+            num_needed = max(0, min(_MAX_QUERY_COUNT, int(num_needed)))
             with open(filepath, "r", encoding="utf-8") as file:
                 data = json.load(file)
-                all_queries = data.get("queries", [])
+                raw_queries = data.get("queries", []) if isinstance(data, dict) else []
+                all_queries = []
+                for raw in raw_queries if isinstance(raw_queries, list) else []:
+                    if not isinstance(raw, str):
+                        continue
+                    query = "".join(
+                        char
+                        for char in raw.strip()
+                        if ord(char) >= 32 and ord(char) != 127
+                    )[:_MAX_QUERY_LENGTH]
+                    if query:
+                        all_queries.append(query)
 
                 if len(all_queries) < num_needed:
                     self._log(
@@ -79,8 +95,18 @@ class SearchEngine:
                 return random.sample(all_queries, num_needed)
 
         except FileNotFoundError:
-            self._log(f"[ERROR] File {filepath} not found!")
-            self._add_to_history("N/A", f"[ERROR] File {filepath} not found")
+            self._log("[ERROR] Search query file was not found.")
+            self._add_to_history("N/A", "[ERROR] Search query file not found")
+            return []
+        except (
+            json.JSONDecodeError,
+            UnicodeDecodeError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            self._log("[ERROR] Search query file is unreadable or malformed.")
+            self._add_to_history("N/A", "[ERROR] Search query file malformed")
             return []
 
     def get_coffee_break_count(self):
@@ -125,7 +151,10 @@ class SearchEngine:
         self._log(f"Loaded {len(queries)} queries. Starting searches...")
         self._log(f"Next coffee break after {next_coffee_break} searches.")
 
-        for i, query in enumerate(queries):
+        for i, raw_query in enumerate(queries):
+            query = safe_log_text(raw_query, limit=_MAX_QUERY_LENGTH).strip()
+            if not query:
+                continue
             if stop_event is not None and stop_event.is_set():
                 self._log("Stop requested — halting search loop.")
                 return successful
@@ -254,7 +283,9 @@ class SearchEngine:
                             if hostname != "bing.com" and not hostname.endswith(
                                 ".bing.com"
                             ):
-                                continue
+                                self._log(
+                                    "[INFO] Closing a non-Bing auxiliary tab opened by the search page."
+                                )
                             driver.close()
                         except WebDriverException as e:
                             short_error = str(e).split("\n")[0][:28]

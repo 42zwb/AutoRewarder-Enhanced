@@ -26,9 +26,10 @@ import sys
 import time
 from datetime import date, datetime
 
-from src.api import AutoRewarderAPI
+from src.api import AutoRewarderAPI, MAX_MOBILE_QUERIES, MAX_PC_QUERIES
 from src.accounts import AccountMetaManager
 from src.config import LOG_FILE_PATH, LOG_MAX_SIZE
+from src.security import safe_log_text
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -50,7 +51,7 @@ def console_log(message):
     Args:
         message (str): The message to log.
     """
-    line = f"[{_iso_now()}] {message}"
+    line = f"[{_iso_now()}] {safe_log_text(message, limit=4000)}"
     print(line)
     try:
         if (
@@ -64,7 +65,7 @@ def console_log(message):
         with open(LOG_FILE_PATH, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except Exception as e:
-        print(f"[ERROR] Can't write log file: {e}")
+        print(f"[ERROR] Can't write log file: {safe_log_text(e)}")
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +117,8 @@ def _run_scheduled(
         duration_hours: how many hours to spread the queries across
         queries_per_hour: target queries per hour (overrides duration_hours if > 0)
     """
-    pc = int(pc)
-    mobile = int(mobile)
+    pc = min(MAX_PC_QUERIES, max(0, int(pc)))
+    mobile = min(MAX_MOBILE_QUERIES, max(0, int(mobile)))
     total = pc + mobile
     duration_hours = float(duration_hours)
     qph = int(queries_per_hour) if queries_per_hour else 0
@@ -329,8 +330,10 @@ def _run_account(
         else sched.get("queries_mobile", 0)
     )
 
-    if pc + mobile <= 0 and not mobile_tasks_only and (
-        skip_mobile_tasks or not meta.get_mobile_tasks().get("enabled")
+    if (
+        pc + mobile <= 0
+        and not mobile_tasks_only
+        and (skip_mobile_tasks or not meta.get_mobile_tasks().get("enabled"))
     ):
         console_log(f"Skipping '{label}': both PC and Mobile counts are 0.")
         return False
@@ -405,8 +408,12 @@ def main():
 
     if args.pc is not None and args.pc < 0:
         parser.error("--pc must be >= 0")
+    if args.pc is not None and args.pc > MAX_PC_QUERIES:
+        parser.error(f"--pc must be <= {MAX_PC_QUERIES}")
     if args.mobile is not None and args.mobile < 0:
         parser.error("--mobile must be >= 0")
+    if args.mobile is not None and args.mobile > MAX_MOBILE_QUERIES:
+        parser.error(f"--mobile must be <= {MAX_MOBILE_QUERIES}")
     if args.mobile_tasks_only and (args.pc is not None or args.mobile is not None):
         parser.error("--mobile-tasks-only cannot be combined with --pc or --mobile")
     if args.mobile_tasks_only and args.skip_mobile_tasks:

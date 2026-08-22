@@ -8,6 +8,7 @@ currently-selected account is tracked in global settings.
 
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime
@@ -22,11 +23,33 @@ from ..config import (
     account_dir,
     account_meta_path,
 )
+from ..security import atomic_write_json
 
 
 def _new_account_id():
     """Return a random short account id."""
     return uuid.uuid4().hex[:12]
+
+
+def _valid_account_id(account_id):
+    return isinstance(account_id, str) and bool(
+        re.fullmatch(r"[A-Za-z0-9_-]{1,64}", account_id)
+    )
+
+
+def _clean_label(label, allow_empty=False):
+    """Normalize labels before they reach logs or OS service definitions."""
+    if label is None:
+        value = ""
+    else:
+        value = str(label)
+    value = "".join(
+        " " if ord(char) < 32 or ord(char) == 127 else char for char in value
+    )
+    value = " ".join(value.split())[:120].strip()
+    if not value and not allow_empty:
+        raise ValueError("Label must not be empty")
+    return value
 
 
 class AccountManager:
@@ -63,17 +86,32 @@ class AccountManager:
         try:
             with open(ACCOUNTS_INDEX_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data if isinstance(data, list) else []
+                if not isinstance(data, list):
+                    return []
+                clean = []
+                for account in data:
+                    if not isinstance(account, dict) or not _valid_account_id(
+                        account.get("id")
+                    ):
+                        continue
+                    clean.append(
+                        {
+                            "id": account["id"],
+                            "label": _clean_label(
+                                account.get("label"), allow_empty=True
+                            )
+                            or "Account",
+                            "created_at": str(account.get("created_at") or "")[:64],
+                        }
+                    )
+                return clean
         except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             return []
 
     def _write_index(self, accounts):
         """Persist the accounts index list to disk atomically."""
         os.makedirs(APP_DIR, exist_ok=True)
-        tmp = ACCOUNTS_INDEX_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(accounts, f, indent=4)
-        os.replace(tmp, ACCOUNTS_INDEX_PATH)
+        atomic_write_json(ACCOUNTS_INDEX_PATH, accounts)
 
     # ---- Queries ------------------------------------------------------
 
@@ -112,7 +150,8 @@ class AccountManager:
 
     def current_id(self):
         """Return the currently selected account id, or None."""
-        return self._global.get_current_account_id()
+        current = self._global.get_current_account_id()
+        return current if _valid_account_id(current) else None
 
     def get_current(self):
         """Return the currently selected account entry, or None."""
@@ -121,12 +160,16 @@ class AccountManager:
 
     def exists(self, account_id):
         """Return True if the account id exists in the index."""
-        return any(acc.get("id") == account_id for acc in self._read_index())
+        return _valid_account_id(account_id) and any(
+            acc.get("id") == account_id for acc in self._read_index()
+        )
 
     def _is_first_setup_done(self, account_id):
         """
         Check whether the account meta marks first setup done.
         """
+        if not _valid_account_id(account_id):
+            return False
         meta_path = account_meta_path(account_id)
         if not os.path.exists(meta_path):
             return False
@@ -149,7 +192,7 @@ class AccountManager:
         Returns:
             dict: A dictionary containing the new account's ID and label.
         """
-        label = (label or "").strip() or "Account"
+        label = _clean_label(label, allow_empty=True) or "Account"
         aid = _new_account_id()
         # Vanishingly unlikely collision, but defensive.
         while self.exists(aid):
@@ -190,9 +233,7 @@ class AccountManager:
         Raises:
             ValueError: If the account is not found or the new label is empty.
         """
-        new_label = (new_label or "").strip()
-        if not new_label:
-            raise ValueError("Label must not be empty")
+        new_label = _clean_label(new_label)
         accounts = self._read_index()
         found = False
         for acc in accounts:

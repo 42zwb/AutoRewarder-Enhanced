@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import threading
 import unittest
 
 from src.mobiletasks.client import ActivityResponse
@@ -26,7 +27,7 @@ class MissingOAuth:
 
 
 class CreditingClient:
-    instances = []
+    instances: list["CreditingClient"] = []
 
     def __init__(self, token, token_refresh=None, logger=None, **kwargs):
         self.balance = 100
@@ -106,7 +107,9 @@ class MobileTaskRunnerTests(unittest.TestCase):
         self.assertEqual(summary.read_points, 30)
         calls = CreditingClient.instances[0].submit_calls
         self.assertEqual([call[0] for call in calls], [103] + [101] * 10)
-        self.assertTrue(all(call[2] == "ENUS_readarticle3_30points" for call in calls[1:]))
+        self.assertTrue(
+            all(call[2] == "ENUS_readarticle3_30points" for call in calls[1:])
+        )
 
     def test_no_read_credit_stops_immediately_as_partial(self):
         runner = self._runner(NoReadCreditClient)
@@ -132,6 +135,24 @@ class MobileTaskRunnerTests(unittest.TestCase):
         summary = runner.run("different-account")
         self.assertEqual(summary.status, "failed")
         self.assertIn("account mismatch", summary.reason)
+
+    def test_stop_request_is_not_reported_as_completed(self):
+        runner = self._runner(CreditingClient)
+        runner.stop_event = threading.Event()
+        runner.stop_event.set()
+        runner.set_config(runner.config)
+        summary = runner.run()
+        self.assertEqual(summary.status, "stopped")
+        self.assertFalse(summary.successful)
+
+    def test_both_subtasks_disabled_are_unavailable_without_oauth(self):
+        runner = self._runner(
+            CreditingClient, check_in_enabled=False, read_to_earn_enabled=False
+        )
+        runner.oauth_factory = MissingOAuth
+        summary = runner.run()
+        self.assertEqual(summary.status, "unavailable")
+        self.assertIn("all mobile tasks disabled", summary.reason)
 
 
 if __name__ == "__main__":

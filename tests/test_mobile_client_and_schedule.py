@@ -5,7 +5,9 @@ from src.mobiletasks.client import (
     RewardsActivityClient,
     RewardsAuthError,
     RewardsClientError,
+    response_says_done,
 )
+from src.mobiletasks.oauth import is_valid_callback_url
 
 
 class FakeResponse:
@@ -83,6 +85,31 @@ class MobileClientTests(unittest.TestCase):
         )
         with self.assertRaises(RewardsAuthError):
             client.get_profile()
+
+    def test_completion_parser_does_not_treat_incomplete_as_done(self):
+        self.assertFalse(response_says_done({"status": "incomplete"}))
+        self.assertFalse(response_says_done({"message": "not completed"}))
+        self.assertTrue(response_says_done({"status": "already_completed"}))
+
+    def test_empty_token_refresh_fails_closed(self):
+        session = FakeSession([FakeResponse(401)])
+        client = RewardsActivityClient(
+            "access", token_refresh=lambda: "", session=session, max_retries=1
+        )
+        with self.assertRaises(RewardsAuthError):
+            client.get_profile()
+
+    def test_oauth_callback_requires_expected_host_path_and_state(self):
+        state = "expected-state"
+        valid = (
+            "https://login.live.com/oauth20_desktop.srf?"
+            "code=abc&state=expected-state"
+        )
+        wrong_state = valid.replace("expected-state", "other-state")
+        wrong_host = valid.replace("login.live.com", "evil.example")
+        self.assertTrue(is_valid_callback_url(valid, state))
+        self.assertFalse(is_valid_callback_url(wrong_state, state))
+        self.assertFalse(is_valid_callback_url(wrong_host, state))
 
 
 class ScheduledBatchTests(unittest.TestCase):
