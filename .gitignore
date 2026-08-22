@@ -1,0 +1,39 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.venv/
+venv/
+
+# Build and release artifacts
+build/
+dist/
+*.exe
+*.zip
+
+# Local runtime data — never commit account state or credentials
+settings.json
+accounts.json
+mobile_status.json
+mobile_token.bin
+status.json
+stats.json
+history.json
+background_log.txt
+*.log
+
+# Local tooling
+.idea/
+.vscode/
+.DS_Store
+
+# Linter / type-checker caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
