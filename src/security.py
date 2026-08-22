@@ -6,7 +6,6 @@ import os
 import tempfile
 from urllib.parse import urlparse
 
-
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
 _SECRET_RE = re.compile(
     r"(?i)(\b(?:access[_ -]?token|refresh[_ -]?token|api[_ -]?key|authorization)\b\s*[:=]\s*)([^\s,;]+)"

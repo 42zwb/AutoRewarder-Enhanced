@@ -1778,13 +1778,11 @@ class AutoRewarderAPI:
                 # Fallback if the forced-prompt URL fails.
                 setup_driver.get("https://login.live.com/")
 
-            self.log(
-                """Sign in with the Microsoft account for THIS profile.
+            self.log("""Sign in with the Microsoft account for THIS profile.
 - Enter the email and password yourself; don't pick a suggested account.
 - If Microsoft still auto-connects another account, click the avatar
   (top-right on Bing) and choose 'Sign in with a different account'.
-- Close the browser when you're done."""
-            )
+- Close the browser when you're done.""")
 
             while len(setup_driver.window_handles) > 0:
                 try:
