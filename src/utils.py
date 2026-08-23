@@ -30,7 +30,13 @@ def humanize_queries(queries):
     Returns:
         humanized_queries (list): Modified query strings with simulated typing errors.
     """
-    import nlpaug.augmenter.char as nac  # type: ignore
+    # nlpaug is an optional cosmetic dependency. Some frozen builds omit its
+    # optional pandas dependency; searches must continue with the original
+    # queries instead of failing the whole PC phase.
+    try:
+        import nlpaug.augmenter.char as nac  # type: ignore
+    except ImportError:
+        return list(queries)
 
     mod = nac.KeyboardAug(
         # 100% probability because the 20% overall chance
