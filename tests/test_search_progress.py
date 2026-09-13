@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import patch
+from threading import Event
+from unittest.mock import Mock, patch
 
 from src.api import AutoRewarderAPI
 from src.search.rewards_progress import (
@@ -104,6 +105,61 @@ class RewardsSearchProgressTests(unittest.TestCase):
         self.assertEqual(result, changed)
         self.assertEqual(fetch.call_count, 2)
         sleep.assert_called_once_with(3)
+
+    def test_mobile_phase_stops_after_one_uncredited_canary(self):
+        unchanged = RewardsSearchProgress(11318, 18, 60, 3)
+        driver = Mock()
+        api = object.__new__(AutoRewarderAPI)
+        api.log = Mock()
+        api.history = None
+        api._build_queries = Mock(return_value=["one", "two", "three"])
+        api.driver_manager = Mock()
+        api.driver_manager.setup_driver.return_value = driver
+        api.search_engine = Mock()
+        api.search_engine.perform_searches.return_value = 1
+        api._stop_event = Event()
+        api._wait_for_search_progress_change = Mock(return_value=unchanged)
+        api._try_scrape_balance = Mock()
+        api._session_counts = {"pc": 0, "mobile": 0}
+        api._search_phase_results = []
+        api._last_scraped_balance = None
+        api._last_run_partial = False
+
+        with patch(
+            "src.api.fetch_rewards_search_progress", return_value=unchanged
+        ), patch("src.api.time.sleep"):
+            result = api._run_phase(mobile=True, count=3, do_daily_set=False)
+
+        self.assertFalse(result)
+        api.driver_manager.setup_driver.assert_called_once_with(mobile=True)
+        api.search_engine.perform_searches.assert_called_once_with(
+            driver,
+            ["one"],
+            mobile=True,
+            stop_event=api._stop_event,
+        )
+        self.assertEqual(api._session_counts["mobile"], 0)
+        self.assertTrue(api._last_run_partial)
+        self.assertEqual(
+            api._search_phase_results,
+            [
+                {
+                    "platform": "mobile",
+                    "status": "uncredited",
+                    "requested": 3,
+                    "submitted": 1,
+                    "credited": 0,
+                    "points_delta": 0,
+                    "before": 18,
+                    "after": 18,
+                    "maximum": 60,
+                    "reason": (
+                        "browser submissions did not increase Rewards search progress"
+                    ),
+                }
+            ],
+        )
+        driver.quit.assert_called_once_with()
 
 
 if __name__ == "__main__":
