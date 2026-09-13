@@ -50,6 +50,7 @@ For headless operation, use an account ID or label from your own local configura
 
 ```powershell
 python AutoRewarder.py --headless --account <account-id>
+python AutoRewarder.py --headless --visible-browser --account <account-id>
 python AutoRewarder.py --headless --account <account-id> --mobile-tasks-only
 python AutoRewarder.py --headless --account <account-id> --skip-mobile-tasks
 ```
@@ -116,6 +117,7 @@ python AutoRewarder.py
 
 ```powershell
 python AutoRewarder.py --headless --account <account-id>
+python AutoRewarder.py --headless --visible-browser --account <account-id>
 python AutoRewarder.py --headless --account <account-id> --mobile-tasks-only
 python AutoRewarder.py --headless --account <account-id> --skip-mobile-tasks
 ```

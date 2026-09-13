@@ -11,8 +11,9 @@ Usage:
     # GUI:
     python AutoRewarder.py
 
-    # Headless / scheduled:
+    # Headless / scheduled (optionally keep Edge visible for diagnostics):
     python AutoRewarder.py --headless [--account <id-or-label>]
+    python AutoRewarder.py --headless --visible-browser --account <id-or-label>
 """
 
 import argparse

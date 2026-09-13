@@ -209,9 +209,13 @@ def _run_scheduled(
 # ---------------------------------------------------------------------------
 
 
-def _create_headless_api():
+def _create_headless_api(visible_browser=False):
     """
-    Build an AutoRewarderAPI bound to the console logger and force hide_browser.
+    Build an AutoRewarderAPI bound to the console logger.
+
+    The browser is hidden by default for CLI compatibility. A caller may keep
+    it visible for debugging browser tasks; visibility does not guarantee that
+    Microsoft Rewards will accept or credit automated searches.
 
     Returns:
         AutoRewarderAPI: a ready-to-run API instance with no GUI
@@ -221,12 +225,12 @@ def _create_headless_api():
     api.log = console_log
     api._safe_log = console_log
 
-    # Force headless at runtime only — do NOT call api.set_hide_browser(True),
-    # which persists to settings.json and would silently flip the user's GUI
-    # preference every time a scheduled run fires.
-    api.hide_browser = True
+    # Runtime-only choice: do not persist it to the GUI settings file.
+    api.hide_browser = not bool(visible_browser)
     if api.driver_manager is not None:
-        api.driver_manager.hide_browser = True
+        api.driver_manager.hide_browser = not bool(visible_browser)
+
+    console_log("Browser mode: " + ("visible" if visible_browser else "headless"))
 
     # Rebind the logger on per-account managers that captured it early.
     if api.history is not None:
@@ -414,6 +418,14 @@ def main():
         action="store_true",
         help="Skip mobile check-in and Read to Earn tasks for diagnosis/fallback.",
     )
+    parser.add_argument(
+        "--visible-browser",
+        action="store_true",
+        help=(
+            "Keep Edge visible for browser-task diagnostics. This does not "
+            "guarantee Rewards search credit."
+        ),
+    )
     args = parser.parse_args()
 
     if args.pc is not None and args.pc < 0:
@@ -429,7 +441,7 @@ def main():
     if args.mobile_tasks_only and args.skip_mobile_tasks:
         parser.error("--mobile-tasks-only cannot be combined with --skip-mobile-tasks")
 
-    api = _create_headless_api()
+    api = _create_headless_api(visible_browser=args.visible_browser)
 
     accounts = api.account_manager.list()
     if not accounts:
