@@ -466,6 +466,8 @@ def main():
             return 0
         if api._last_run_status == "completed":
             return 0
+        if api._last_run_status == "manual_required":
+            return 3
         if api._last_run_status in ("partial", "stopped"):
             return 2
         return 1
@@ -489,6 +491,8 @@ def main():
         return 0
     if any(status == "failed" for status in statuses):
         return 1
+    if any(status == "manual_required" for status in statuses):
+        return 3
     if any(status in ("partial", "stopped") for status in statuses):
         return 2
     return 0

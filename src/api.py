@@ -2524,6 +2524,15 @@ class AutoRewarderAPI:
             if self._stop_event.is_set():
                 self._last_run_status = "stopped"
                 self.log("Stopped.")
+            elif any(
+                result.get("status") == "uncredited"
+                for result in self._search_phase_results
+            ):
+                self._last_run_status = "manual_required"
+                self.log(
+                    "Automated search was not credited by Microsoft Rewards; "
+                    "manual search is required."
+                )
             elif (
                 self._last_run_partial
                 or self._last_mobile_summary is not None
