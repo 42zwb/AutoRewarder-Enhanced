@@ -8,6 +8,10 @@ English | [中文](#中文说明)
 
 AutoRewarder Enhanced is a Windows-oriented desktop automation project for Microsoft Rewards. It extends the upstream AutoRewarder browser workflow with a separately controlled mobile-activity layer, stronger daily-task verification, per-account state, diagnostics, and tests.
 
+### Known issue: Bing searches may not earn points
+
+As of 2026-09-13, both the desktop and mobile Selenium search paths have been reproduced completing their browser actions while Microsoft Rewards awards no search points. The current search counter and `Done!` message report browser-operation completion only; they do **not** prove that Rewards accepted or credited the searches. Do not rely on automated search results until this notice is removed. Investigation and a credit-verified fix are in progress. Mobile check-in, Read to Earn, Daily Set, and More Activities were outside the scope of this reproduction and are not covered by this notice.
+
 ### Main features
 
 - PC and mobile Bing search workflows through Selenium Edge profiles.
@@ -67,6 +71,10 @@ The browser automation, application structure, and original resources are derive
 ## 中文说明
 
 AutoRewarder 增强版是基于 [safarsin/AutoRewarder](https://github.com/safarsin/AutoRewarder) 修改的 Microsoft Rewards 自动化项目。上游代码采用 MIT License，本仓库保留上游版权和许可证；中文许可证说明见 [LICENSE.zh-CN.md](LICENSE.zh-CN.md)。
+
+### 已知问题：Bing 搜索可能不计分
+
+截至 2026-09-13，桌面端和移动端 Selenium 搜索均已复现“浏览器动作完成，但 Microsoft Rewards 没有增加搜索积分”的问题。当前搜索计数和 `Done!` 只表示浏览器操作执行完毕，**不能**证明 Rewards 已接受搜索并计分。在本说明移除前，请勿依赖自动搜索结果；项目正在排查并实现以实际计分为准的修复。本次复现没有覆盖移动签到、阅读以赚取、Daily Set 和 More Activities，因此本说明不对这些任务的状态作判断。
 
 ### 功能
 
