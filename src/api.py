@@ -2781,6 +2781,17 @@ class AutoRewarderAPI:
         )
         return queries + extra
 
+    def _wait_for_search_progress_change(self, driver, previous_points, attempts=4):
+        """Poll the uncached Rewards counter after a browser submission."""
+        latest = None
+        for attempt in range(max(1, int(attempts or 1))):
+            latest = fetch_rewards_search_progress(driver)
+            if latest is not None and latest.points != previous_points:
+                break
+            if attempt + 1 < max(1, int(attempts or 1)):
+                time.sleep(3)
+        return latest
+
     def _run_phase(self, mobile, count, do_daily_set):
         """
         Open a driver for a single phase (PC or Mobile), do `count` searches,
@@ -2842,27 +2853,58 @@ class AutoRewarderAPI:
                     f"Rewards search progress before {label}: "
                     f"{progress_before.points}/{progress_before.maximum} points."
                 )
+                # Submit one canary query first. If Rewards declines that query,
+                # stop immediately instead of sending the rest of the batch.
                 done = self.search_engine.perform_searches(
                     self._driver,
-                    queries_to_search,
+                    queries_to_search[:1],
                     mobile=mobile,
                     stop_event=self._stop_event,
                 )
                 if not self._stop_event.is_set():
-                    # Rewards can update asynchronously. Re-read the uncached
-                    # server counter a few times before classifying the run.
-                    for attempt in range(4):
-                        progress_after = fetch_rewards_search_progress(self._driver)
-                        if (
-                            progress_after is not None
-                            and progress_after.points != progress_before.points
-                        ):
-                            break
-                        if attempt < 3:
-                            time.sleep(3)
-                    credit_result = evaluate_search_credit(
+                    progress_after = self._wait_for_search_progress_change(
+                        self._driver, progress_before.points
+                    )
+                    canary_result = evaluate_search_credit(
                         progress_before, progress_after, done
                     )
+                    if not canary_result.successful:
+                        credit_result = canary_result
+                    elif (
+                        len(queries_to_search) > 1
+                        and progress_after is not None
+                        and not progress_after.complete
+                    ):
+                        canary_points = progress_after.points
+                        done += self.search_engine.perform_searches(
+                            self._driver,
+                            queries_to_search[1:],
+                            mobile=mobile,
+                            stop_event=self._stop_event,
+                        )
+                        if not self._stop_event.is_set():
+                            progress_after = self._wait_for_search_progress_change(
+                                self._driver, canary_points
+                            )
+                            credit_result = evaluate_search_credit(
+                                progress_before, progress_after, done
+                            )
+                    else:
+                        credit_result = canary_result
+
+                    if (
+                        credit_result is not None
+                        and credit_result.successful
+                        and done < len(queries_to_search)
+                        and not (progress_after and progress_after.complete)
+                    ):
+                        credit_result = SearchCreditResult(
+                            "partial",
+                            credit_result.submitted,
+                            credit_result.credited,
+                            credit_result.points_delta,
+                            f"only {done}/{len(queries_to_search)} Bing results loaded",
+                        )
 
             # Stats count verified Rewards searches, never browser submissions.
             bucket = "mobile" if mobile else "pc"

@@ -1,5 +1,7 @@
 import unittest
+from unittest.mock import patch
 
+from src.api import AutoRewarderAPI
 from src.search.rewards_progress import (
     RewardsSearchProgress,
     evaluate_search_credit,
@@ -89,6 +91,19 @@ class RewardsSearchProgressTests(unittest.TestCase):
         result = evaluate_search_credit(before, None, submitted=0)
         self.assertEqual(result.status, "already_done")
         self.assertTrue(result.successful)
+
+    def test_progress_polling_waits_for_a_counter_change(self):
+        unchanged = RewardsSearchProgress(100, 18, 60, 3)
+        changed = RewardsSearchProgress(103, 21, 60, 3)
+        api = object.__new__(AutoRewarderAPI)
+        with patch(
+            "src.api.fetch_rewards_search_progress",
+            side_effect=[unchanged, changed],
+        ) as fetch, patch("src.api.time.sleep") as sleep:
+            result = api._wait_for_search_progress_change(object(), 18, attempts=4)
+        self.assertEqual(result, changed)
+        self.assertEqual(fetch.call_count, 2)
+        sleep.assert_called_once_with(3)
 
 
 if __name__ == "__main__":
