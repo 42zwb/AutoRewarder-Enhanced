@@ -14,6 +14,10 @@ As of 2026-09-13, both the desktop and mobile Selenium search paths have been re
 
 The code now treats the authenticated Rewards `pcSearch` counter—not a Selenium keypress—as the source of truth. It validates the Bing results URL, removes the unstable random Images/Videos/News tab switching, and submits one canary query before any remaining batch. If the server counter does not increase, it records no credited search, returns exit code `3` (`manual_required`), and stops instead of reporting `Done!` or repeatedly submitting searches. Other partial failures return exit code `2`. This fixes the false-success bug; it does **not** bypass Microsoft eligibility decisions or guarantee that automated searches earn points. Mobile check-in, Read to Earn, Daily Set, and More Activities were outside the scope of this reproduction and are not covered by this notice.
 
+Diagnosis on the reproduced account ruled out the usual local causes: the account was authenticated, the Rewards user-info endpoint returned a valid balance and `18/60` search progress, the desktop result URL loaded correctly, and the mobile session reported an iPhone user agent, a 412×915 viewport, five touch points, and a coarse pointer. Neither automated path changed the server counter, while one manual search on the same account immediately changed it from `15/60` to `18/60` and increased the balance by 3. No explicit cooldown or restriction flag was exposed by the user-info payload. The evidence therefore locates the remaining decision at Microsoft’s server-side eligibility layer rather than in the GUI, cached balance, sign-in state, query count, or mobile emulation switch.
+
+There is no supported automatic workaround for a server rejection of automated Rewards searches. Changing fingerprints, hiding WebDriver, or adding “human-like” timing would attempt to evade the eligibility controls and is intentionally not implemented here. Stop automated searches and use manually entered, genuine searches; if manual searches also stop receiving credit, wait for any temporary earning limitation to clear or contact Microsoft Rewards Support. The application’s `manual_required` result is a truthful hand-off, not a recoverable browser error.
+
 ### Main features
 
 - PC and mobile Bing search workflows through Selenium Edge profiles.
@@ -80,6 +84,10 @@ AutoRewarder 增强版是基于 [safarsin/AutoRewarder](https://github.com/safar
 截至 2026-09-13，桌面端和移动端 Selenium 搜索均已复现“浏览器动作完成，但 Microsoft Rewards 没有增加搜索积分”的问题。测试时账号保持登录，紧接着进行的人工搜索可以获得 3 分，但每次自动化测试后的官方 Rewards 计数均不变。微软把符合条件的 Rewards 搜索定义为用户为了真实个人研究而手动输入的搜索，并明确排除机器人、宏和其他自动化方式；官方支持页也明确要求不要使用程序辅助搜索（[微软服务协议](https://www.microsoft.com/en-us/servicesagreement)、[Rewards 搜索限制说明](https://support.microsoft.com/en-au/accounts-billing/rewards/limiting-your-searches-in-microsoft-rewards)）。
 
 代码现已改为以登录账号返回的 Rewards `pcSearch` 计数为准，而不是把 Selenium 按下回车当作成功；同时验证 Bing 结果页 URL、移除不稳定的图片/视频/新闻随机标签跳转，并在剩余批次前只提交一次探测搜索。若服务端计数不增长，则计分搜索记为 0、返回退出码 `3`（`manual_required`）并立即停止；其他部分失败返回退出码 `2`。程序不再误报 `Done!` 或持续重复提交。该修改解决的是“程序误报成功”问题，**不会**绕过微软的资格判定，也不能保证自动搜索获得积分。本次复现没有覆盖移动签到、阅读以赚取、Daily Set 和 More Activities，因此本说明不对这些任务的状态作判断。
+
+本次账号实测已经排除常见的本机原因：账号处于登录状态，Rewards 用户信息接口可以正常返回余额和搜索进度 `18/60`，桌面端能进入正确的 Bing 结果页；移动会话也确实报告 iPhone UA、`412×915` 视口、5 个触点和粗指针。桌面、移动两条自动路径都没有改变服务端计数，而同一账号随后进行一次人工搜索，进度立即从 `15/60` 变为 `18/60`，余额增加 3 分。用户信息响应中也没有公开的冷却或限制标志。因此，剩余判定发生在微软服务端的搜索资格层，而不是界面缓存、登录状态、查询次数或 mobile 模拟开关。
+
+服务端拒绝自动搜索后，不存在受支持的自动修复办法。更换指纹、隐藏 WebDriver 或进一步增加“拟人化”节奏都属于尝试规避资格控制，本仓库不会实现。此时应停止自动搜索，改为用户亲自输入、用于真实查询的搜索；如果人工搜索也不再计分，应等待临时获取限制解除，或联系 Microsoft Rewards 支持。程序返回的 `manual_required` 是准确的人工接管状态，不是一个可以靠重启浏览器恢复的错误。
 
 ### 功能
 
