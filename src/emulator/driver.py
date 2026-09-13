@@ -24,7 +24,8 @@ class DriverManager:
         self.profile_path = profile_path
         self.hide_browser = hide_browser
 
-    # Realistic iPhone UA so Microsoft Rewards credits the searches as mobile.
+    # Mobile browser identity used to exercise the mobile rendering path.
+    # This does not imply that Microsoft Rewards will accept or credit a search.
     MOBILE_USER_AGENT = (
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2_1 like Mac OS X) "
         "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 "
@@ -43,8 +44,9 @@ class DriverManager:
                 the Windows-account-based auto sign-in. Used during First
                 Setup so a second MSA can actually log in.
             mobile: When True, launch Edge with an iPhone user agent and a
-                mobile-sized viewport so Rewards credits the searches as
-                mobile. When False, use the desktop viewport.
+                mobile-sized viewport for mobile-path diagnostics. Rewards
+                eligibility remains a server-side decision. When False, use
+                the desktop viewport.
 
         Returns:
             webdriver.Edge: The configured WebDriver instance.
@@ -94,11 +96,10 @@ class DriverManager:
         _driver = webdriver.Edge(options=options)
 
         if mobile:
-            # Turn the session into a genuine mobile one at the engine level.
-            # Beyond the UA string, this makes `navigator.maxTouchPoints > 0`,
-            # `window.matchMedia("(pointer: coarse)")` true, the viewport match
-            # iPhone metrics, and touch events fire for real — so sites that
-            # fingerprint using the DOM/CSS touch surface see a real mobile.
+            # Keep DOM input and viewport behavior consistent with the mobile
+            # rendering path: touch points, coarse-pointer media queries, and
+            # iPhone-sized metrics. This is a browser-emulation diagnostic and
+            # is not evidence of Rewards eligibility or successful credit.
             try:
                 _driver.execute_cdp_cmd(
                     "Emulation.setTouchEmulationEnabled",
