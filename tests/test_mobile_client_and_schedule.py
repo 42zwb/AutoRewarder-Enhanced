@@ -119,9 +119,12 @@ class ScheduledBatchTests(unittest.TestCase):
         class FakeAPI:
             def __init__(self):
                 self.calls = []
+                self._last_run_status = "idle"
 
             def main(self, *args, **kwargs):
                 self.calls.append((args, kwargs))
+                self._last_run_status = "completed"
+                return {"status": "completed"}
 
         api = FakeAPI()
         with patch("AutoRewarder_CLI.console_log"), patch(
@@ -140,6 +143,34 @@ class ScheduledBatchTests(unittest.TestCase):
         self.assertTrue(api.calls[0][1]["include_mobile_tasks"])
         self.assertFalse(api.calls[1][1]["include_mobile_tasks"])
         self.assertFalse(api.calls[2][1]["include_mobile_tasks"])
+
+    def test_advanced_batches_stop_after_unverified_result(self):
+        from AutoRewarder_CLI import _run_scheduled
+
+        class PartialAPI:
+            def __init__(self):
+                self.calls = []
+                self._last_run_status = "idle"
+
+            def main(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                self._last_run_status = "partial"
+                return {"status": "partial"}
+
+        api = PartialAPI()
+        with patch("AutoRewarder_CLI.console_log"), patch(
+            "AutoRewarder_CLI.time.sleep"
+        ), patch("AutoRewarder_CLI.random.uniform", return_value=1.0):
+            _run_scheduled(
+                api,
+                pc=3,
+                mobile=0,
+                duration_hours=0,
+                queries_per_hour=6,
+                include_mobile_tasks=True,
+            )
+
+        self.assertEqual(len(api.calls), 1)
 
 
 if __name__ == "__main__":

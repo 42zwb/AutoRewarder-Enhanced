@@ -84,7 +84,7 @@ def _run_once(api, pc, mobile, include_mobile_tasks=True, mobile_tasks_only=Fals
     """
     console_log(f"Single run: PC={pc}, Mobile={mobile}")
     try:
-        api.main(
+        return api.main(
             int(pc),
             int(mobile),
             include_mobile_tasks=include_mobile_tasks,
@@ -92,6 +92,8 @@ def _run_once(api, pc, mobile, include_mobile_tasks=True, mobile_tasks_only=Fals
         )
     except Exception as e:
         console_log(f"[ERROR] Run failed: {e}")
+        api._last_run_status = "failed"
+        return {"status": "failed", "error": str(e)[:240]}
 
 
 def _run_scheduled(
@@ -173,13 +175,21 @@ def _run_scheduled(
             f"(PC left {pc_left}, Mobile left {mobile_left})"
         )
         try:
-            api.main(
+            result = api.main(
                 batch_pc,
                 batch_mobile,
                 include_mobile_tasks=bool(include_mobile_tasks and i == 0),
             )
+            if not isinstance(result, dict) or result.get("status") != "completed":
+                console_log(
+                    f"[ERROR] Batch {i+1} was not verified complete; "
+                    "stopping the remaining batches."
+                )
+                break
         except Exception as e:
             console_log(f"[ERROR] Batch {i+1} failed: {e}")
+            api._last_run_status = "failed"
+            break
 
         pc_left -= batch_pc
         mobile_left -= batch_mobile
@@ -424,14 +434,14 @@ def main():
     accounts = api.account_manager.list()
     if not accounts:
         console_log("No accounts configured. Nothing to do.")
-        return
+        return 0
 
     if args.account:
         acc = _resolve_account(api, args.account)
         if acc is None:
             console_log(f"[ERROR] No account matches '{args.account}'.")
-            return
-        _run_account(
+            return 1
+        ran = _run_account(
             api,
             acc,
             pc_override=args.pc,
@@ -440,11 +450,18 @@ def main():
             mobile_tasks_only=args.mobile_tasks_only,
             skip_mobile_tasks=args.skip_mobile_tasks,
         )
-        return
+        if not ran:
+            return 0
+        if api._last_run_status == "completed":
+            return 0
+        if api._last_run_status in ("partial", "stopped"):
+            return 2
+        return 1
 
     # Default: iterate every enabled schedule. api._run_lock ensures only one
     # run executes at a time inside the process.
     ran_any = False
+    statuses = []
     for acc in accounts:
         if _run_account(
             api,
@@ -454,13 +471,20 @@ def main():
             skip_mobile_tasks=args.skip_mobile_tasks,
         ):
             ran_any = True
+            statuses.append(api._last_run_status)
     if not ran_any:
         console_log("No schedules matched today.")
+        return 0
+    if any(status == "failed" for status in statuses):
+        return 1
+    if any(status in ("partial", "stopped") for status in statuses):
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(int(main() or 0))
     except KeyboardInterrupt:
         console_log("Interrupted by user; exiting.")
         sys.exit(0)

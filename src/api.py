@@ -39,7 +39,15 @@ from .accounts import (
     GlobalSettingsManager,
 )
 from .emulator import DriverManager, HumanBehavior, edge_policy
-from .search import HistoryManager, SearchEngine, llm, resolve_search_locale
+from .search import (
+    HistoryManager,
+    SearchCreditResult,
+    SearchEngine,
+    evaluate_search_credit,
+    fetch_rewards_search_progress,
+    llm,
+    resolve_search_locale,
+)
 from .dailytasks import DailySet
 from .stats import (
     StatsManager,
@@ -145,6 +153,9 @@ class AutoRewarderAPI:
         # surfaced to the dashboard so a failed read can be debugged in place.
         self._last_balance_debug = {}
         self._last_mobile_summary = None
+        self._last_run_partial = False
+        self._last_run_status = "idle"
+        self._search_phase_results = []
 
         self._rebuild_account_context()
 
@@ -2244,11 +2255,24 @@ class AutoRewarderAPI:
                 f"(PC left {pc_left}, Mobile left {mobile_left})"
             )
 
+            batch_ok = True
             if batch_pc > 0 and not self._stop_event.is_set():
-                self._run_phase(mobile=False, count=batch_pc, do_daily_set=True)
+                batch_ok = self._run_phase(
+                    mobile=False, count=batch_pc, do_daily_set=True
+                )
 
             if batch_mobile > 0 and not self._stop_event.is_set():
-                self._run_phase(mobile=True, count=batch_mobile, do_daily_set=False)
+                batch_ok = self._run_phase(
+                    mobile=True, count=batch_mobile, do_daily_set=False
+                )
+
+            if not batch_ok and not self._stop_event.is_set():
+                self.log(
+                    "[ERROR] Advanced schedule stopped because the current batch "
+                    "was not verified complete."
+                )
+                self._last_run_partial = True
+                break
 
             pc_left -= batch_pc
             mobile_left -= batch_mobile
@@ -2450,6 +2474,8 @@ class AutoRewarderAPI:
         }
         self._last_scraped_balance = None
         self._last_run_partial = False
+        self._last_run_status = "running"
+        self._search_phase_results = []
 
         try:
             self._last_mobile_summary = None
@@ -2486,22 +2512,29 @@ class AutoRewarderAPI:
                     if pc_count > 0 and not self._stop_event.is_set():
                         self._run_phase(mobile=False, count=pc_count, do_daily_set=True)
 
-                    if mobile_count > 0 and not self._stop_event.is_set():
+                    if (
+                        mobile_count > 0
+                        and not self._stop_event.is_set()
+                        and not self._last_run_partial
+                    ):
                         self._run_phase(
                             mobile=True, count=mobile_count, do_daily_set=False
                         )
 
             if self._stop_event.is_set():
+                self._last_run_status = "stopped"
                 self.log("Stopped.")
             elif (
                 self._last_run_partial
                 or self._last_mobile_summary is not None
                 and not self._last_mobile_summary.successful
             ):
+                self._last_run_status = "partial"
                 self.log(
                     "Done with partial tasks; check the activity log and status files."
                 )
             else:
+                self._last_run_status = "completed"
                 self.log("Done!")
 
             # A non-stopped run is an attempted run even when one task is
@@ -2533,6 +2566,11 @@ class AutoRewarderAPI:
             except Exception:
                 pass
             self._run_lock.release()
+
+        return {
+            "status": self._last_run_status,
+            "searches": list(self._search_phase_results),
+        }
 
     def _try_scrape_balance(self):
         """
@@ -2765,19 +2803,109 @@ class AutoRewarderAPI:
         self._driver = self.driver_manager.setup_driver(mobile=mobile)
         try:
             done = 0
+            credit_result = None
+            progress_before = None
+            progress_after = None
             if queries_to_search:
+                progress_before = fetch_rewards_search_progress(self._driver)
+
+            if queries_to_search and progress_before is None:
+                credit_result = SearchCreditResult(
+                    "unavailable",
+                    0,
+                    0,
+                    None,
+                    "Rewards search counter unavailable before the run",
+                )
+                self.log(
+                    f"[ERROR] {label} search skipped: the Rewards search counter "
+                    "could not be read, so credit cannot be verified."
+                )
+            elif queries_to_search and progress_before.complete:
+                credit_result = evaluate_search_credit(progress_before, None, 0)
+                progress_after = progress_before
+                self.log(
+                    f"{label} search already complete: "
+                    f"{progress_before.points}/{progress_before.maximum} points."
+                )
+            elif queries_to_search:
+                self.log(
+                    f"Rewards search progress before {label}: "
+                    f"{progress_before.points}/{progress_before.maximum} points."
+                )
                 done = self.search_engine.perform_searches(
                     self._driver,
                     queries_to_search,
                     mobile=mobile,
                     stop_event=self._stop_event,
                 )
-            # Tally successful searches against the right platform bucket.
+                if not self._stop_event.is_set():
+                    # Rewards can update asynchronously. Re-read the uncached
+                    # server counter a few times before classifying the run.
+                    for attempt in range(4):
+                        progress_after = fetch_rewards_search_progress(self._driver)
+                        if (
+                            progress_after is not None
+                            and progress_after.points != progress_before.points
+                        ):
+                            break
+                        if attempt < 3:
+                            time.sleep(3)
+                    credit_result = evaluate_search_credit(
+                        progress_before, progress_after, done
+                    )
+
+            # Stats count verified Rewards searches, never browser submissions.
             bucket = "mobile" if mobile else "pc"
-            self._session_counts[bucket] += int(done or 0)
-            phase_ok = (count <= 0 and not queries_to_search) or (
-                bool(queries_to_search) and int(done or 0) >= len(queries_to_search)
-            )
+            if credit_result is not None:
+                self._session_counts[bucket] += int(credit_result.credited or 0)
+                snapshot = progress_after or progress_before
+                if snapshot is not None and snapshot.balance is not None:
+                    self._last_scraped_balance = snapshot.balance
+                self._search_phase_results.append(
+                    {
+                        "platform": bucket,
+                        "status": credit_result.status,
+                        "requested": int(count or 0),
+                        "submitted": int(credit_result.submitted or 0),
+                        "credited": int(credit_result.credited or 0),
+                        "points_delta": credit_result.points_delta,
+                        "before": (
+                            progress_before.points
+                            if progress_before is not None
+                            else None
+                        ),
+                        "after": (
+                            progress_after.points
+                            if progress_after is not None
+                            else None
+                        ),
+                        "maximum": snapshot.maximum if snapshot is not None else None,
+                        "reason": credit_result.reason,
+                    }
+                )
+                phase_ok = credit_result.successful
+                if credit_result.status == "completed":
+                    self.log(
+                        f"{label} search credit verified: +{credit_result.points_delta} "
+                        f"points ({credit_result.credited} search(es))."
+                    )
+                elif credit_result.status == "already_done":
+                    phase_ok = True
+                else:
+                    details = (
+                        f"; reason={credit_result.reason}"
+                        if credit_result.reason
+                        else ""
+                    )
+                    self.log(
+                        f"[ERROR] {label} search status={credit_result.status}; "
+                        f"submitted={credit_result.submitted}, "
+                        f"credited={credit_result.credited}, "
+                        f"points_delta={credit_result.points_delta}{details}."
+                    )
+            else:
+                phase_ok = count <= 0 and not queries_to_search
             if not phase_ok and not self._stop_event.is_set():
                 self._last_run_partial = True
 

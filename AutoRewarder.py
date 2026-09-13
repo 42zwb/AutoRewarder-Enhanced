@@ -35,8 +35,7 @@ if __name__ == "__main__":
 
         from AutoRewarder_CLI import main as headless_main
 
-        headless_main()
-        sys.exit(0)
+        sys.exit(int(headless_main() or 0))
 
     # GUI path — import webview + the API lazily so the headless path doesn't
     # pay for the pywebview import cost.

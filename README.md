@@ -10,7 +10,9 @@ AutoRewarder Enhanced is a Windows-oriented desktop automation project for Micro
 
 ### Known issue: Bing searches may not earn points
 
-As of 2026-09-13, both the desktop and mobile Selenium search paths have been reproduced completing their browser actions while Microsoft Rewards awards no search points. The current search counter and `Done!` message report browser-operation completion only; they do **not** prove that Rewards accepted or credited the searches. Do not rely on automated search results until this notice is removed. Investigation and a credit-verified fix are in progress. Mobile check-in, Read to Earn, Daily Set, and More Activities were outside the scope of this reproduction and are not covered by this notice.
+As of 2026-09-13, both the desktop and mobile Selenium search paths have been reproduced completing their browser actions while Microsoft Rewards awards no search points. The account remained signed in and an immediately following manual search earned 3 points, while the authenticated Rewards counter stayed unchanged after each automated test. Microsoft defines a qualifying Rewards search as text manually entered for genuine personal research and explicitly excludes bots, macros, and other automated means; its support guidance also says not to use programs for searching ([Services Agreement](https://www.microsoft.com/en-us/servicesagreement), [Rewards search limits](https://support.microsoft.com/en-au/accounts-billing/rewards/limiting-your-searches-in-microsoft-rewards)).
+
+The code now treats the authenticated Rewards `pcSearch` counter—not a Selenium keypress—as the source of truth. It validates the Bing results URL, removes the unstable random Images/Videos/News tab switching, records only server-credited searches, returns a non-zero CLI result for `uncredited`/partial runs, and stops later batches instead of reporting `Done!` or repeatedly submitting searches. This fixes the false-success bug; it does **not** bypass Microsoft eligibility decisions or guarantee that automated searches earn points. Mobile check-in, Read to Earn, Daily Set, and More Activities were outside the scope of this reproduction and are not covered by this notice.
 
 ### Main features
 
@@ -74,7 +76,9 @@ AutoRewarder 增强版是基于 [safarsin/AutoRewarder](https://github.com/safar
 
 ### 已知问题：Bing 搜索可能不计分
 
-截至 2026-09-13，桌面端和移动端 Selenium 搜索均已复现“浏览器动作完成，但 Microsoft Rewards 没有增加搜索积分”的问题。当前搜索计数和 `Done!` 只表示浏览器操作执行完毕，**不能**证明 Rewards 已接受搜索并计分。在本说明移除前，请勿依赖自动搜索结果；项目正在排查并实现以实际计分为准的修复。本次复现没有覆盖移动签到、阅读以赚取、Daily Set 和 More Activities，因此本说明不对这些任务的状态作判断。
+截至 2026-09-13，桌面端和移动端 Selenium 搜索均已复现“浏览器动作完成，但 Microsoft Rewards 没有增加搜索积分”的问题。测试时账号保持登录，紧接着进行的人工搜索可以获得 3 分，但每次自动化测试后的官方 Rewards 计数均不变。微软把符合条件的 Rewards 搜索定义为用户为了真实个人研究而手动输入的搜索，并明确排除机器人、宏和其他自动化方式；官方支持页也明确要求不要使用程序辅助搜索（[微软服务协议](https://www.microsoft.com/en-us/servicesagreement)、[Rewards 搜索限制说明](https://support.microsoft.com/en-au/accounts-billing/rewards/limiting-your-searches-in-microsoft-rewards)）。
+
+代码现已改为以登录账号返回的 Rewards `pcSearch` 计数为准，而不是把 Selenium 按下回车当作成功；同时验证 Bing 结果页 URL、移除不稳定的图片/视频/新闻随机标签跳转、只统计服务端实际计分的搜索，并在 `uncredited`/部分完成时返回非零状态、停止后续批次，不再误报 `Done!` 或持续重复提交。该修改解决的是“程序误报成功”问题，**不会**绕过微软的资格判定，也不能保证自动搜索获得积分。本次复现没有覆盖移动签到、阅读以赚取、Daily Set 和 More Activities，因此本说明不对这些任务的状态作判断。
 
 ### 功能
 

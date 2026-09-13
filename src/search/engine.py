@@ -3,10 +3,11 @@
 import json
 import random
 import time
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import NoSuchElementException, WebDriverException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
 
 from ..utils import human_typing
 from ..emulator import HumanBehavior
@@ -14,6 +15,22 @@ from ..security import safe_log_text
 
 _MAX_QUERY_LENGTH = 256
 _MAX_QUERY_COUNT = 130
+
+
+def is_bing_search_result_url(value):
+    """Return True only for an HTTPS Bing results URL with a query value."""
+    try:
+        parsed = urlparse(str(value or ""))
+    except (TypeError, ValueError):
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or not (
+        hostname == "bing.com" or hostname.endswith(".bing.com")
+    ):
+        return False
+    if parsed.path.rstrip("/").lower() != "/search":
+        return False
+    return bool(parse_qs(parsed.query).get("q"))
 
 
 class SearchEngine:
@@ -138,8 +155,9 @@ class SearchEngine:
                 coffee break is interrupted immediately.
 
         Returns:
-            int: the number of searches that completed successfully (used by
-                the stats layer to record activity for this run).
+            int: number of queries confirmed to reach a Bing results URL. This
+                is a browser-submission count, not proof that Rewards credited
+                the searches; the caller must verify server-side progress.
         """
 
         human = HumanBehavior(driver, show_cursor=True, mobile=mobile)
@@ -202,64 +220,16 @@ class SearchEngine:
                 human_typing(search_box, query)
                 search_box.send_keys(Keys.RETURN)  # Press Enter to search
 
-                # Wait for result to load
+                # A keypress is not enough to call the browser action
+                # successful. Confirm that Bing actually reached a results URL.
+                WebDriverWait(driver, 20).until(
+                    lambda current: is_bing_search_result_url(current.current_url)
+                )
                 time.sleep(random.uniform(2, 4))
-
-                tabs_config = [
-                    {"name": "All", "priority": 70, "id": None},
-                    {"name": "Images", "priority": 10, "id": "b-scopeListItem-images"},
-                    {"name": "Videos", "priority": 10, "id": "b-scopeListItem-video"},
-                    {"name": "News", "priority": 10, "id": "b-scopeListItem-news"},
-                ]
-
-                weights = [tab["priority"] for tab in tabs_config]
-                chosen_tab = random.choices(tabs_config, weights=weights, k=1)[0]
-
-                if chosen_tab["name"] != "All":
-                    main_tab = driver.current_window_handle
-                    tab_element = None
-
-                    # Check if news tab exists, if it doesn't choose Images or Videos
-                    if chosen_tab["name"] == "News":
-                        try:
-                            xpath = f"//nav/ul/li[@id='{chosen_tab['id']}']/a"
-                            tab_element = driver.find_element(By.XPATH, xpath)
-                        except NoSuchElementException:
-                            chosen_tab = random.choice(tabs_config[1:3])
-
-                    self._log(f"Chosen behavior: Switch to {chosen_tab['name']}")
-                    try:
-                        # Find the tab element using its id
-                        if not tab_element:
-                            xpath = f"//nav/ul/li[@id='{chosen_tab['id']}']/a"
-                            tab_element = driver.find_element(By.XPATH, xpath)
-
-                        # Move mouse and click the tab
-                        human.click_element(tab_element)
-
-                        time.sleep(random.uniform(3, 6))
-
-                    except NoSuchElementException:
-                        self._log(
-                            f"[WARNING] Tab {chosen_tab['name']} not found. Staying on 'All'."
-                        )
-
-                        # Fallback to "All" if the chosen tab is not found
-                        chosen_tab["name"] = "All"
-
-                    except WebDriverException as e:
-                        short_error = str(e).split("\n")[0][:28]
-                        self._log(
-                            f"[WARNING] WebDriver error when switching to {chosen_tab['name']}: {short_error}."
-                        )
-                        self._log("Staying on 'All'.")
-
-                        chosen_tab["name"] = "All"
 
                 # Scroll the page to mimic human behavior
                 try:
-                    if chosen_tab["name"] == "All":
-                        human.scroll_page()
+                    human.scroll_page()
                 except WebDriverException as e:
                     short_error = str(e).split("\n")[0][:28]
                     self._log(
@@ -269,35 +239,10 @@ class SearchEngine:
                 # Pause after scrolling
                 time.sleep(random.uniform(2, 4))
 
-                # Close all tabs other than main
-                if chosen_tab["name"] != "All":
-                    new_tabs = [tab for tab in driver.window_handles if tab != main_tab]
-                    for tab in new_tabs:
-                        try:
-                            driver.switch_to.window(tab)
-                            hostname = (
-                                (urlparse(driver.current_url).hostname or "")
-                                .lower()
-                                .rstrip(".")
-                            )
-                            if hostname != "bing.com" and not hostname.endswith(
-                                ".bing.com"
-                            ):
-                                self._log(
-                                    "[INFO] Closing a non-Bing auxiliary tab opened by the search page."
-                                )
-                            driver.close()
-                        except WebDriverException as e:
-                            short_error = str(e).split("\n")[0][:28]
-                            self._log(
-                                f"[WARNING] WebDriver error when closing tab: {short_error}. Continuing."
-                            )
-
-                    if main_tab in driver.window_handles:
-                        driver.switch_to.window(main_tab)
-
                 # Add to history.json
-                self._add_to_history(query, "Success")
+                self._add_to_history(
+                    query, "Browser submitted; Rewards credit not yet verified"
+                )
                 successful += 1
 
             except NoSuchElementException:
